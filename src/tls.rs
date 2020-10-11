@@ -10,11 +10,11 @@ use smoltcp::wire::Ipv4Address;
 use smoltcp::wire::IpEndpoint;
 use smoltcp::Result;
 use smoltcp::Error;
+use smoltcp::iface::EthernetInterface;
+use smoltcp::time::Instant;
+use smoltcp::phy::Device;
 
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
-
-use heapless::Vec;
-use heapless::consts::*;
 
 use core::convert::TryInto;
 use core::convert::TryFrom;
@@ -22,7 +22,10 @@ use core::convert::TryFrom;
 use rand_core::{RngCore, CryptoRng};
 use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret};
 
+use alloc::vec::{ self, Vec };
+
 use crate::tls_packet::*;
+use crate::parse::parse_tls_repr;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
@@ -81,7 +84,15 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		}
 	}
 
-	pub fn tls_connect(&mut self, sockets: &mut SocketSet) -> Result<bool> {
+	pub fn tls_connect<DeviceT>(
+		&mut self,
+		iface: EthernetInterface<DeviceT>,
+		sockets: &mut SocketSet,
+		now: Instant
+	) -> Result<bool>
+	where
+		DeviceT: for<'d> Device<'d>
+	{
 		// Check tcp_socket connectivity
 		{
 			let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
@@ -183,13 +194,13 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				compression_method_length: 1,
 				compression_methods: 0,
 				extension_length: supported_versions_extension.get_length(),
-				extensions: &[
+				extensions: vec![
 					supported_versions_extension,
 					signature_algorithms_extension,
 					supported_groups_extension,
 					psk_key_exchange_modes_extension,
-					key_share_extension,
-				],
+					key_share_extension
+				]
 			};
 
 			client_hello.extension_length = {
@@ -244,10 +255,25 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 	}
 
 	// Generic inner recv method, through TCP socket
-	fn recv_tls_repr<'a>(&'a mut self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<TlsRepr<'a>> {
+	fn recv_tls_repr<'a>(&'a mut self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec::<TlsRepr>> {
 		let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
-		let size = tcp_socket.recv_slice(byte_array)?;
-		todo!()
+		tcp_socket.recv_slice(byte_array)?;
+		let mut vec: Vec<TlsRepr> = Vec::new();
+
+		let mut bytes: &[u8] = byte_array;
+		loop {
+			match parse_tls_repr(bytes) {
+				Ok((rest, repr)) => {
+					vec.push(repr);
+					if rest.len() == 0 {
+						return Ok(vec);
+					} else {
+						bytes = rest;
+					}
+				},
+				_ => return Err(Error::Unrecognized),
+			};
+		}
 	}
 }
 
@@ -317,7 +343,7 @@ impl<'a> TlsBuffer<'a> {
 		Ok(slice)
 	}
 
-	fn enqueue_tls_repr(&mut self, tls_repr: TlsRepr) -> Result<()> {
+	fn enqueue_tls_repr(&mut self, tls_repr: TlsRepr<'a>) -> Result<()> {
 		self.write_u8(tls_repr.content_type.into())?;
 		self.write_u16(tls_repr.version.into())?;
 		self.write_u16(tls_repr.length)?;
@@ -332,13 +358,13 @@ impl<'a> TlsBuffer<'a> {
 		Ok(())
 	}
 
-	fn enqueue_handshake_repr(&mut self, handshake_repr: HandshakeRepr) -> Result<()> {
+	fn enqueue_handshake_repr(&mut self, handshake_repr: HandshakeRepr<'a>) -> Result<()> {
 		self.write_u8(handshake_repr.msg_type.into())?;
 		self.write_u24(handshake_repr.length)?;
 		self.enqueue_handshake_data(handshake_repr.handshake_data)
 	}
 
-	fn enqueue_handshake_data(&mut self, handshake_data: HandshakeData) -> Result<()> {
+	fn enqueue_handshake_data(&mut self, handshake_data: HandshakeData<'a>) -> Result<()> {
 		match handshake_data {
 			HandshakeData::ClientHello(client_hello) => {
 				self.enqueue_client_hello(client_hello)
@@ -349,7 +375,7 @@ impl<'a> TlsBuffer<'a> {
 		}
 	}
 
-	fn enqueue_client_hello(&mut self, client_hello: ClientHello) -> Result<()> {
+	fn enqueue_client_hello(&mut self, client_hello: ClientHello<'a>) -> Result<()> {
 		self.write_u16(client_hello.version.into())?;
 		self.write(&client_hello.random)?;
 		self.write_u8(client_hello.session_id_length)?;
@@ -364,7 +390,7 @@ impl<'a> TlsBuffer<'a> {
 		self.enqueue_extensions(client_hello.extensions)
 	}
 
-	fn enqueue_extensions(&mut self, extensions: &[Extension]) -> Result<()> {
+	fn enqueue_extensions(&mut self, extensions: Vec<Extension<'a>>) -> Result<()> {
 		for extension in extensions {
 			self.write_u16(extension.extension_type.into())?;
 			self.write_u16(extension.length)?;

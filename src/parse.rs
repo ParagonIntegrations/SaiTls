@@ -11,9 +11,9 @@ use byteorder::{ByteOrder, NetworkEndian, BigEndian};
 use crate::tls_packet::*;
 use core::convert::TryFrom;
 
-use heapless::{ Vec, consts::* };
+use alloc::vec::Vec;
 
-fn parse_tls(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
+pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
     let content_type = take(1_usize);
     let version = take(2_usize);
     let length = take(2_usize);
@@ -65,7 +65,9 @@ fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
         use crate::tls_packet::HandshakeType::*;
         match repr.msg_type {
             ServerHello => {
-                todo!()
+                let (rest, data) = parse_server_hello(bytes)?;
+                repr.handshake_data = data;
+                Ok((rest, repr))
             },
             _ => todo!()
         }
@@ -90,27 +92,26 @@ fn parse_server_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
     let (mut rest, (cipher_suite, compression_method, extension_length)) =
         tuple((cipher_suite, compression_method, extension_length))(rest)?;
     
-    let mut extension_length = NetworkEndian::read_u16(extension_length);
-    
     let mut server_hello = ServerHello {
         version: TlsVersion::try_from(NetworkEndian::read_u16(version)).unwrap(),
         random,
-        session_id_echo_length: session_id_echo_length,
+        session_id_echo_length,
         session_id_echo,
         cipher_suite: CipherSuite::try_from(NetworkEndian::read_u16(cipher_suite)).unwrap(),
         compression_method: compression_method[0],
-        extension_length,
-        extensions: &[]
+        extension_length: NetworkEndian::read_u16(extension_length),
+        extensions: Vec::new(),
     };
 
-    let mut extension_vec: Vec<Extension, U32> = Vec::new();
+    let mut extension_vec: Vec<Extension> = Vec::new();
+    let mut extension_length: i32 = server_hello.extension_length.into();
     while extension_length >= 0 {
         let (rem, extension) = parse_extension(rest)?;
         rest = rem;
-        extension_length -= extension.get_length();
+        extension_length -= i32::try_from(extension.get_length()).unwrap();
 
         // Todo:: Proper error
-        if extension_vec.push(extension).is_err() || extension_length < 0 {
+        if extension_length < 0 {
             todo!()
         }
     }

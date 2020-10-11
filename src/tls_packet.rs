@@ -1,8 +1,14 @@
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
+
+use rand_core::RngCore;
+use rand_core::CryptoRng;
+
 use core::convert::TryFrom;
 use core::convert::TryInto;
+
+use alloc::vec::Vec;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -26,13 +32,32 @@ pub(crate) enum TlsVersion {
 	Tls13 = 0x0304,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct TlsRepr<'a> {
 	pub(crate) content_type: TlsContentType,
 	pub(crate) version: TlsVersion,
 	pub(crate) length: u16,
 	pub(crate) payload: Option<&'a[u8]>,
 	pub(crate) handshake: Option<HandshakeRepr<'a>>
+}
+
+impl<'a> TlsRepr<'a> {
+	pub(crate) fn new() -> Self {
+		TlsRepr {
+			content_type: TlsContentType::Invalid,
+			version: TlsVersion::Tls12,
+			length: 0,
+			payload: None,
+			handshake: None,
+		}
+	}
+
+	pub(crate) fn client_hello(mut self) -> Self {
+		self.content_type = TlsContentType::Handshake;
+		self.version = TlsVersion::Tls10;
+		// TODO: Fill in handshake field
+		self
+	}
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -53,7 +78,7 @@ pub(crate) enum HandshakeType {
 	MessageHash = 254,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct HandshakeRepr<'a> {
 	pub(crate) msg_type: HandshakeType,
 	pub(crate) length: u32,
@@ -61,6 +86,14 @@ pub(crate) struct HandshakeRepr<'a> {
 }
 
 impl<'a, 'b> HandshakeRepr<'a> {
+	pub(self) fn new() -> Self {
+		HandshakeRepr {
+			msg_type: HandshakeType::Unknown,
+			length: 0,
+			handshake_data: HandshakeData::Uninitialized,
+		}
+	}
+
 	pub(crate) fn get_length(&self) -> u16 {
 		let mut length :u16 = 1;		// Handshake Type
 		length += 3;					// Length of Handshake data
@@ -70,6 +103,7 @@ impl<'a, 'b> HandshakeRepr<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[allow(non_camel_case)]
 #[repr(u16)]
 pub(crate) enum CipherSuite {
 	TLS_AES_128_GCM_SHA256 = 0x1301,
@@ -79,7 +113,7 @@ pub(crate) enum CipherSuite {
 	TLS_AES_128_CCM_8_SHA256 = 0x1305,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ClientHello<'a> {
 	pub(crate) version: TlsVersion,         // Legacy: Must be Tls12 (0x0303)
 	pub(crate) random: [u8; 32],
@@ -90,10 +124,10 @@ pub(crate) struct ClientHello<'a> {
 	pub(crate) compression_method_length: u8,   // Legacy: Must be 1, to contain a byte
 	pub(crate) compression_methods: u8,         // Legacy: Must be 1 byte of 0
 	pub(crate) extension_length: u16,
-	pub(crate) extensions: &'a[Extension<'a>],
+	pub(crate) extensions: Vec<Extension<'a>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum HandshakeData<'a> {
 	Uninitialized,
 	ClientHello(ClientHello<'a>),
@@ -111,6 +145,33 @@ impl<'a> HandshakeData<'a> {
 }
 
 impl<'a> ClientHello<'a> {
+	pub(self) fn new<T>(rng: &mut T) -> Self
+	where
+		T: RngCore + CryptoRng
+	{
+		let mut client_hello = ClientHello {
+			version: TlsVersion::Tls12,
+			random: [0; 32],
+			session_id_length: 32,
+			session_id: [0; 32],
+			cipher_suites_length: 0,
+			cipher_suites: &[
+				CipherSuite::TLS_AES_128_GCM_SHA256,
+				CipherSuite::TLS_AES_256_GCM_SHA384,
+				CipherSuite::TLS_CHACHA20_POLY1305_SHA256,
+			],
+			compression_method_length: 1,
+			compression_methods: 0,
+			extension_length: 0,
+			extensions: Vec::new(),
+		};
+
+		rng.fill_bytes(&mut client_hello.random);
+		rng.fill_bytes(&mut client_hello.session_id);
+
+		client_hello
+	}
+
 	pub(crate) fn get_length(&self) -> u32 {
 		let mut length :u32 = 2;                    // TlsVersion size
 		length += 32;      // Random size
@@ -128,7 +189,7 @@ impl<'a> ClientHello<'a> {
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ServerHello<'a> {
 	pub(crate) version: TlsVersion,
 	pub(crate) random: &'a[u8],
@@ -137,7 +198,7 @@ pub(crate) struct ServerHello<'a> {
 	pub(crate) cipher_suite: CipherSuite,
 	pub(crate) compression_method: u8,     // Always 0
 	pub(crate) extension_length: u16,
-	pub(crate) extensions: &'a[Extension<'a>],
+	pub(crate) extensions: Vec<Extension<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
