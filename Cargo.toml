@@ -40,4 +40,4 @@ features = []
 [dependencies.nom]
 version = "5.1.2"
 default-features = false
-features= [ "regex", "lexical" ]
+features= []
