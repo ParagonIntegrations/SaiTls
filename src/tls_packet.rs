@@ -274,8 +274,8 @@ impl<'a> ClientHello<'a> {
 		let length = list.len()*2;
 
 		// Use the list to generate all key shares and store in a vec
-		let client_shares = Vec::new();
-		let client_shares_length = 0;
+		let mut client_shares = Vec::new();
+		let mut client_shares_length = 0;
 		for named_group in list.iter() {
 			let mut key_exchange = Vec::new();
 			let key_share_entry = match named_group {
@@ -317,7 +317,7 @@ impl<'a> ClientHello<'a> {
 			extension_type: ExtensionType::KeyShare,
 			length: length.try_into().unwrap(),
 			extension_data,
-		}
+		};
 
 		let group_list = NamedGroupList {
 			length: length.try_into().unwrap(),
@@ -329,7 +329,7 @@ impl<'a> ClientHello<'a> {
 			extension_type: ExtensionType::SupportedGroups,
 			length: length.try_into().unwrap(),
 			extension_data,
-		}
+		};
 
 		self.extensions.push(group_list_extension);
 		self.extensions.push(key_share_extension);
@@ -464,7 +464,7 @@ pub(crate) struct Cookie {
 	cookie: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 pub(crate) enum SignatureScheme {
 	/* RSASSA-PKCS1-v1_5 algorithms */
@@ -494,8 +494,8 @@ pub(crate) enum SignatureScheme {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SignatureSchemeList {
-	length: u16,
-	supported_signature_algorithms: Vec<SignatureScheme>,
+	pub(crate) length: u16,
+	pub(crate) supported_signature_algorithms: Vec<SignatureScheme>,
 }
 
 impl SignatureSchemeList {
@@ -504,7 +504,7 @@ impl SignatureSchemeList {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 pub(crate) enum NamedGroup {
 	/* Elliptic Curve Groups (ECDHE) */
@@ -524,8 +524,8 @@ pub(crate) enum NamedGroup {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NamedGroupList {
-	length: u16,
-	named_group_list: Vec<NamedGroup>,
+	pub(crate) length: u16,
+	pub(crate) named_group_list: Vec<NamedGroup>,
 }
 
 impl NamedGroupList {
@@ -536,9 +536,9 @@ impl NamedGroupList {
 
 #[derive(Debug, Clone)]
 pub(crate) struct KeyShareEntry {
-	group: NamedGroup,
-	length: u16,
-	key_exchange: Vec<u8>,
+	pub(crate) group: NamedGroup,
+	pub(crate) length: u16,
+	pub(crate) key_exchange: Vec<u8>,
 }
 
 impl KeyShareEntry {

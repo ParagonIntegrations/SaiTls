@@ -103,127 +103,129 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		}
 
 		if self.state == TlsState::START {
-			// Create TLS representation, length and payload not finalised
-			let mut random: [u8; 32] = [0; 32];
-			self.rng.fill_bytes(&mut random);
-			let mut session_id: [u8; 32] = [0; 32];
-			self.rng.fill_bytes(&mut session_id);
-
-			let cipher_suites_length = 6;
-			let cipher_suites = [
-				CipherSuite::TLS_AES_128_GCM_SHA256,
-				CipherSuite::TLS_AES_256_GCM_SHA384,
-				CipherSuite::TLS_CHACHA20_POLY1305_SHA256,
-			];
-
-			// Length: to be determined
-			let supported_versions_extension = Extension {
-				extension_type: ExtensionType::SupportedVersions,
-				length: 5,
-				extension_data: &[
-					4,  // Number of supported versions * 2
-					// Need 2 bytes to contain a version
-					0x03, 0x04,		// 0x0304: TLS Version 1.3
-					0x03, 0x03,		// 0x0303: TLS version 1.2
-				]
-			};
-
-			let signature_algorithms_extension = Extension {
-				extension_type: ExtensionType::SignatureAlgorithms,
-				length: 24,
-				extension_data: &[
-					0x00, 22,			// Length in bytes
-					0x04, 0x03,			// ecdsa_secp256r1_sha256
-					0x08, 0x07,			// ed25519
-					0x08, 0x09,			// rsa_pss_pss_sha256
-					0x04, 0x01,			// rsa_pkcs1_sha256
-					0x08, 0x04,			// rsa_pss_rsae_sha256
-					0x08, 0x0a,			// rsa_pss_pss_sha384
-					0x05, 0x01,			// rsa_pkcs1_sha384
-					0x08, 0x05,			// rsa_pss_rsae_sha384
-					0x08, 0x0b,			// rsa_pss_pss_sha512
-					0x06, 0x01,			// rsa_pkcs1_sha512
-					0x08, 0x06,			// rsa_pss_rsae_sha512
-				]
-			};
-
-			let supported_groups_extension = Extension {
-				extension_type: ExtensionType::SupportedGroups,
-				length: 4,
-				extension_data: &[
-					0x00, 0x02,			// Length in bytes
-					0x00, 0x17,			// secp256r1
-				]
-			};
-
-			let key_share_extension = Extension {
-				extension_type: ExtensionType::KeyShare,
-				length: 71,
-				extension_data: &{
-					let ecdh_secret = unsafe { EphemeralSecret::random(&mut self.rng) };
-					let ecdh_public = EncodedPoint::from(&ecdh_secret);
-					let x_coor = ecdh_public.x();
-					let y_coor = ecdh_public.y().unwrap();
-					let mut data: [u8; 71] = [0; 71];
-					data[0..2].copy_from_slice(&[0x00, 69]);	// Length in bytes
-					data[2..4].copy_from_slice(&[0x00, 0x17]);	// secp256r1
-					data[4..6].copy_from_slice(&[0x00, 65]);	// key exchange length
-					data[6..7].copy_from_slice(&[0x04]);		// Fixed legacy value
-					data[7..39].copy_from_slice(&x_coor);
-					data[39..71].copy_from_slice(&y_coor);
-					data
-				}
-			};
-
-			let psk_key_exchange_modes_extension = Extension {
-				extension_type: ExtensionType::PSKKeyExchangeModes,
-				length: 2,
-				extension_data: &[
-					0x01,				// Length in bytes
-					0x01,				// psk_dhe_ke
-				]
-			};
-
-			let mut client_hello = ClientHello {
-				version: TlsVersion::Tls12,
-				random,
-				session_id_length: 32,
-				session_id,
-				cipher_suites_length,
-				cipher_suites: &cipher_suites,
-				compression_method_length: 1,
-				compression_methods: 0,
-				extension_length: supported_versions_extension.get_length().try_into().unwrap(),
-				extensions: vec![
-					supported_versions_extension,
-					signature_algorithms_extension,
-					supported_groups_extension,
-					psk_key_exchange_modes_extension,
-					key_share_extension
-				]
-			};
-
-			client_hello.extension_length = {
-				let mut sum = 0;
-				for ext in client_hello.extensions.iter() {
-					sum += ext.get_length();
-				}
-				sum.try_into().unwrap()
-			};
-
-			let handshake_repr = HandshakeRepr {
-				msg_type: HandshakeType::ClientHello,
-				length: client_hello.get_length(),
-				handshake_data: HandshakeData::ClientHello(client_hello),
-			};
-
-			let repr = TlsRepr {
-				content_type: TlsContentType::Handshake,
-				version: TlsVersion::Tls10,
-				length: handshake_repr.get_length(),
-				payload: None,
-				handshake: Some(handshake_repr),
-			};
+//			// Create TLS representation, length and payload not finalised
+//			let mut random: [u8; 32] = [0; 32];
+//			self.rng.fill_bytes(&mut random);
+//			let mut session_id: [u8; 32] = [0; 32];
+//			self.rng.fill_bytes(&mut session_id);
+//
+//			let cipher_suites_length = 6;
+//			let cipher_suites = [
+//				CipherSuite::TLS_AES_128_GCM_SHA256,
+//				CipherSuite::TLS_AES_256_GCM_SHA384,
+//				CipherSuite::TLS_CHACHA20_POLY1305_SHA256,
+//			];
+//
+//			// Length: to be determined
+//			let supported_versions_extension = Extension {
+//				extension_type: ExtensionType::SupportedVersions,
+//				length: 5,
+//				extension_data: &[
+//					4,  // Number of supported versions * 2
+//					// Need 2 bytes to contain a version
+//					0x03, 0x04,		// 0x0304: TLS Version 1.3
+//					0x03, 0x03,		// 0x0303: TLS version 1.2
+//				]
+//			};
+//
+//			let signature_algorithms_extension = Extension {
+//				extension_type: ExtensionType::SignatureAlgorithms,
+//				length: 24,
+//				extension_data: &[
+//					0x00, 22,			// Length in bytes
+//					0x04, 0x03,			// ecdsa_secp256r1_sha256
+//					0x08, 0x07,			// ed25519
+//					0x08, 0x09,			// rsa_pss_pss_sha256
+//					0x04, 0x01,			// rsa_pkcs1_sha256
+//					0x08, 0x04,			// rsa_pss_rsae_sha256
+//					0x08, 0x0a,			// rsa_pss_pss_sha384
+//					0x05, 0x01,			// rsa_pkcs1_sha384
+//					0x08, 0x05,			// rsa_pss_rsae_sha384
+//					0x08, 0x0b,			// rsa_pss_pss_sha512
+//					0x06, 0x01,			// rsa_pkcs1_sha512
+//					0x08, 0x06,			// rsa_pss_rsae_sha512
+//				]
+//			};
+//
+//			let supported_groups_extension = Extension {
+//				extension_type: ExtensionType::SupportedGroups,
+//				length: 4,
+//				extension_data: &[
+//					0x00, 0x02,			// Length in bytes
+//					0x00, 0x17,			// secp256r1
+//				]
+//			};
+//
+//			let key_share_extension = Extension {
+//				extension_type: ExtensionType::KeyShare,
+//				length: 71,
+//				extension_data: &{
+//					let ecdh_secret = unsafe { EphemeralSecret::random(&mut self.rng) };
+//					let ecdh_public = EncodedPoint::from(&ecdh_secret);
+//					let x_coor = ecdh_public.x();
+//					let y_coor = ecdh_public.y().unwrap();
+//					let mut data: [u8; 71] = [0; 71];
+//					data[0..2].copy_from_slice(&[0x00, 69]);	// Length in bytes
+//					data[2..4].copy_from_slice(&[0x00, 0x17]);	// secp256r1
+//					data[4..6].copy_from_slice(&[0x00, 65]);	// key exchange length
+//					data[6..7].copy_from_slice(&[0x04]);		// Fixed legacy value
+//					data[7..39].copy_from_slice(&x_coor);
+//					data[39..71].copy_from_slice(&y_coor);
+//					data
+//				}
+//			};
+//
+//			let psk_key_exchange_modes_extension = Extension {
+//				extension_type: ExtensionType::PSKKeyExchangeModes,
+//				length: 2,
+//				extension_data: &[
+//					0x01,				// Length in bytes
+//					0x01,				// psk_dhe_ke
+//				]
+//			};
+//
+//			let mut client_hello = ClientHello {
+//				version: TlsVersion::Tls12,
+//				random,
+//				session_id_length: 32,
+//				session_id,
+//				cipher_suites_length,
+//				cipher_suites: &cipher_suites,
+//				compression_method_length: 1,
+//				compression_methods: 0,
+//				extension_length: supported_versions_extension.get_length().try_into().unwrap(),
+//				extensions: vec![
+//					supported_versions_extension,
+//					signature_algorithms_extension,
+//					supported_groups_extension,
+//					psk_key_exchange_modes_extension,
+//					key_share_extension
+//				]
+//			};
+//
+//			client_hello.extension_length = {
+//				let mut sum = 0;
+//				for ext in client_hello.extensions.iter() {
+//					sum += ext.get_length();
+//				}
+//				sum.try_into().unwrap()
+//			};
+//
+//			let handshake_repr = HandshakeRepr {
+//				msg_type: HandshakeType::ClientHello,
+//				length: client_hello.get_length(),
+//				handshake_data: HandshakeData::ClientHello(client_hello),
+//			};
+//
+//			let repr = TlsRepr {
+//				content_type: TlsContentType::Handshake,
+//				version: TlsVersion::Tls10,
+//				length: handshake_repr.get_length(),
+//				payload: None,
+//				handshake: Some(handshake_repr),
+//			};
+			let repr = TlsRepr::new()
+				.client_hello(&mut self.rng);
 
 			log::info!("{:?}", repr);
 
@@ -394,8 +396,68 @@ impl<'a> TlsBuffer<'a> {
 		for extension in extensions {
 			self.write_u16(extension.extension_type.into())?;
 			self.write_u16(extension.length)?;
-			self.write(extension.extension_data)?;
+//			self.write(extension.extension_data)?;
+			self.enqueue_extension_data(extension.extension_data)?;
 		}
+		Ok(())
+	}
+
+	fn enqueue_extension_data(&mut self, extension_data: ExtensionData) -> Result<()> {
+		use crate::tls_packet::ExtensionData::*;
+		match extension_data {
+			SupportedVersions(s) => {
+				use crate::tls_packet::SupportedVersions::*;
+				match s {
+					ClientHello { length, versions } => {
+						self.write_u16(length)?;
+						for version in versions.iter() {
+							self.write_u16((*version).into())?;
+						}
+					},
+					ServerHello { selected_version } => {
+						self.write_u16(selected_version.into())?;
+					}
+				}
+			},
+			SignatureAlgorithms(s) => {
+				self.write_u16(s.length)?;
+				for sig_alg in s.supported_signature_algorithms.iter() {
+					self.write_u16((*sig_alg).into())?;
+				}
+			},
+			NegotiatedGroups(n) => {
+				self.write_u16(n.length)?;
+				for group in n.named_group_list.iter() {
+					self.write_u16((*group).into())?;
+				}
+			},
+			KeyShareEntry(k) => {
+				let key_share_entry_into = |entry: crate::tls_packet::KeyShareEntry| {
+					self.write_u16(entry.group.into())?;
+					self.write_u16(entry.length)?;
+					self.write(entry.key_exchange.as_slice())
+				};
+
+				use crate::tls_packet::KeyShareEntryContent::*;
+				match k {
+					KeyShareClientHello { length, client_shares } => {
+						self.write_u16(length)?;
+						for share in client_shares.iter() {
+							key_share_entry_into(*share)?;
+						}
+					}
+					KeyShareHelloRetryRequest { selected_group } => {
+						self.write_u16(selected_group.into())?;
+					}
+					KeyShareServerHello { server_share } => {
+						key_share_entry_into(server_share)?;
+					}
+				}
+			},
+
+			// TODO: Implement buffer formatting for other extensions
+			_ => todo!()
+		};
 		Ok(())
 	}
 }
