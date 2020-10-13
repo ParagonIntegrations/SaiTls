@@ -86,7 +86,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
 	pub fn tls_connect<DeviceT>(
 		&mut self,
-		iface: EthernetInterface<DeviceT>,
+		iface: &mut EthernetInterface<DeviceT>,
 		sockets: &mut SocketSet,
 		now: Instant
 	) -> Result<bool>
@@ -193,7 +193,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				cipher_suites: &cipher_suites,
 				compression_method_length: 1,
 				compression_methods: 0,
-				extension_length: supported_versions_extension.get_length(),
+				extension_length: supported_versions_extension.get_length().try_into().unwrap(),
 				extensions: vec![
 					supported_versions_extension,
 					signature_algorithms_extension,
@@ -208,7 +208,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				for ext in client_hello.extensions.iter() {
 					sum += ext.get_length();
 				}
-				sum
+				sum.try_into().unwrap()
 			};
 
 			let handshake_repr = HandshakeRepr {
@@ -390,7 +390,7 @@ impl<'a> TlsBuffer<'a> {
 		self.enqueue_extensions(client_hello.extensions)
 	}
 
-	fn enqueue_extensions(&mut self, extensions: Vec<Extension<'a>>) -> Result<()> {
+	fn enqueue_extensions(&mut self, extensions: Vec<Extension>) -> Result<()> {
 		for extension in extensions {
 			self.write_u16(extension.extension_type.into())?;
 			self.write_u16(extension.length)?;

@@ -5,6 +5,8 @@ use num_enum::TryFromPrimitive;
 use rand_core::RngCore;
 use rand_core::CryptoRng;
 
+use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret};
+
 use core::convert::TryFrom;
 use core::convert::TryInto;
 
@@ -52,10 +54,19 @@ impl<'a> TlsRepr<'a> {
 		}
 	}
 
-	pub(crate) fn client_hello(mut self) -> Self {
+	pub(crate) fn client_hello<T>(mut self, rng: &mut T) -> Self
+	where
+		T: RngCore + CryptoRng
+	{
 		self.content_type = TlsContentType::Handshake;
 		self.version = TlsVersion::Tls10;
-		// TODO: Fill in handshake field
+		self.handshake = Some({
+			let mut repr = HandshakeRepr::new();
+			repr.handshake_data = HandshakeData::ClientHello({
+				ClientHello::new(rng)
+			});
+			repr
+		});
 		self
 	}
 }
@@ -103,7 +114,7 @@ impl<'a, 'b> HandshakeRepr<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
-#[allow(non_camel_case)]
+#[allow(non_camel_case_types)]
 #[repr(u16)]
 pub(crate) enum CipherSuite {
 	TLS_AES_128_GCM_SHA256 = 0x1301,
@@ -124,7 +135,7 @@ pub(crate) struct ClientHello<'a> {
 	pub(crate) compression_method_length: u8,   // Legacy: Must be 1, to contain a byte
 	pub(crate) compression_methods: u8,         // Legacy: Must be 1 byte of 0
 	pub(crate) extension_length: u16,
-	pub(crate) extensions: Vec<Extension<'a>>,
+	pub(crate) extensions: Vec<Extension>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +180,160 @@ impl<'a> ClientHello<'a> {
 		rng.fill_bytes(&mut client_hello.random);
 		rng.fill_bytes(&mut client_hello.session_id);
 
+		client_hello.add_ch_supported_versions();
+		client_hello.add_sig_algs();
+		client_hello.add_client_groups_with_key_shares(&mut rng);
+		
 		client_hello
+	}
+
+	pub(crate) fn add_ch_supported_versions(mut self) -> Self {
+		let length = 2;
+		let mut versions = Vec::new();
+		versions.push(TlsVersion::Tls13);
+
+		let mut content = SupportedVersions::ClientHello {
+			length,
+			versions,
+		};
+
+		let extension_data = ExtensionData::SupportedVersions(content);
+		let length = extension_data.get_length();
+		let extension = Extension {
+			extension_type: ExtensionType::SupportedVersions,
+			length: length.try_into().unwrap(),
+			extension_data,
+		};
+		
+		self.extensions.push(extension);
+		self
+	}
+
+	pub(crate) fn add_sh_supported_versions(mut self) -> Self {
+		let selected_version = TlsVersion::Tls13;
+
+		let mut content = SupportedVersions::ServerHello {
+			selected_version
+		};
+
+		let extension_data = ExtensionData::SupportedVersions(content);
+		let length = extension_data.get_length();
+		let extension = Extension {
+			extension_type: ExtensionType::SupportedVersions,
+			length: length.try_into().unwrap(),
+			extension_data,
+		};
+		
+		self.extensions.push(extension);
+		self
+	}
+
+	pub(crate) fn add_sig_algs(mut self) -> Self {
+		let mut algorithms = Vec::new();
+		{
+			use SignatureScheme::*;
+			algorithms.push(ecdsa_secp256r1_sha256);
+			algorithms.push(ed25519);
+			algorithms.push(rsa_pss_pss_sha256);
+			algorithms.push(rsa_pkcs1_sha256);
+			algorithms.push(rsa_pss_rsae_sha256);
+			algorithms.push(rsa_pss_pss_sha384);
+			algorithms.push(rsa_pkcs1_sha384);
+			algorithms.push(rsa_pss_rsae_sha384);
+			algorithms.push(rsa_pss_pss_sha512);
+			algorithms.push(rsa_pkcs1_sha512);
+			algorithms.push(rsa_pss_rsae_sha512);
+		}
+		let length = algorithms.len() * 2;
+
+		let list = SignatureSchemeList {
+			supported_signature_algorithms: algorithms,
+			length: length.try_into().unwrap(),
+		};
+
+		let extension_data = ExtensionData::SignatureAlgorithms(list);
+		let length = extension_data.get_length();
+		let extension = Extension {
+			extension_type: ExtensionType::SignatureAlgorithms,
+			length: length.try_into().unwrap(),
+			extension_data
+		};
+
+		self.extensions.push(extension);
+		self
+	}
+
+	pub(crate) fn add_client_groups_with_key_shares<T>(mut self, rng: &mut T) -> Self
+	where
+		T: RngCore + CryptoRng
+	{
+		// List out all supported groups
+		let mut list = Vec::new();
+		list.push(NamedGroup::secp256r1);
+
+		let length = list.len()*2;
+
+		// Use the list to generate all key shares and store in a vec
+		let client_shares = Vec::new();
+		let client_shares_length = 0;
+		for named_group in list.iter() {
+			let mut key_exchange = Vec::new();
+			let key_share_entry = match named_group {
+				NamedGroup::secp256r1 => {
+					let ecdh_secret = EphemeralSecret::random(&mut rng);
+					let ecdh_public = EncodedPoint::from(&ecdh_secret);
+					
+					let x_coor = ecdh_public.x();
+					let y_coor = ecdh_public.y().unwrap();
+
+					key_exchange.push(0x04);					// Legacy value
+					key_exchange.extend_from_slice(&x_coor);	
+					key_exchange.extend_from_slice(&y_coor);
+
+					let key_exchange_length = key_exchange.len();
+
+					KeyShareEntry {
+						group: *named_group,
+						length: key_exchange_length.try_into().unwrap(),
+						key_exchange
+					}
+				},
+				// TODO: Implement keygen for other named groups
+				_ => todo!(),
+			};
+
+			client_shares_length += key_share_entry.get_length();
+			client_shares.push(key_share_entry);
+		}
+
+		// Pack up the client shares into key share
+		let key_share_content = KeyShareEntryContent::KeyShareClientHello {
+			length: client_shares_length.try_into().unwrap(),
+			client_shares,
+		};
+		let extension_data = ExtensionData::KeyShareEntry(key_share_content);
+		let length = extension_data.get_length();
+		let key_share_extension = Extension {
+			extension_type: ExtensionType::KeyShare,
+			length: length.try_into().unwrap(),
+			extension_data,
+		}
+
+		let group_list = NamedGroupList {
+			length: length.try_into().unwrap(),
+			named_group_list: list,
+		};
+		let extension_data = ExtensionData::NegotiatedGroups(group_list);
+		let length = extension_data.get_length();
+		let group_list_extension = Extension {
+			extension_type: ExtensionType::SupportedGroups,
+			length: length.try_into().unwrap(),
+			extension_data,
+		}
+
+		self.extensions.push(group_list_extension);
+		self.extensions.push(key_share_extension);
+		self
 	}
 
 	pub(crate) fn get_length(&self) -> u32 {
@@ -198,7 +362,7 @@ pub(crate) struct ServerHello<'a> {
 	pub(crate) cipher_suite: CipherSuite,
 	pub(crate) compression_method: u8,     // Always 0
 	pub(crate) extension_length: u16,
-	pub(crate) extensions: Vec<Extension<'a>>,
+	pub(crate) extensions: Vec<Extension>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -234,15 +398,195 @@ impl ExtensionType {
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Extension<'a> {
+#[derive(Debug, Clone)]
+pub(crate) struct Extension {
 	pub(crate) extension_type: ExtensionType,
 	pub(crate) length: u16,
-	pub(crate) extension_data: &'a[u8],
+	pub(crate) extension_data: ExtensionData,
 }
 
-impl<'a> Extension<'a> {
-	pub(crate) fn get_length(&self) -> u16 {
-		self.extension_type.get_length() + 2 + (self.extension_data.len() as u16)
+impl Extension {
+	pub(crate) fn get_length(&self) -> usize {
+		2 + 2 + usize::try_from(self.length).unwrap()
 	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExtensionData {
+	SupportedVersions(SupportedVersions),
+	Cookie(Cookie),
+	SignatureAlgorithms(SignatureSchemeList),
+	SignatureAlgorithmsCertificate(SignatureSchemeList),
+	NegotiatedGroups(NamedGroupList),
+	KeyShareEntry(KeyShareEntryContent),
+	ServerName(ServerName),
+}
+
+impl ExtensionData {
+	pub(crate) fn get_length(&self) -> usize {
+		match self {
+			Self::SupportedVersions(s) => s.get_length(),
+			Self::SignatureAlgorithms(list) => list.get_length(),
+			Self::NegotiatedGroups(list) => list.get_length(),
+			Self::KeyShareEntry(entry_content) => entry_content.get_length(),
+
+			// Implement get_length for all textension data
+			_ => todo!()
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SupportedVersions {
+	ClientHello {
+		length: u16,
+		versions: Vec<TlsVersion>,
+	},
+	ServerHello {
+		selected_version: TlsVersion,
+	}
+}
+
+impl SupportedVersions {
+	pub(crate) fn get_length(&self) -> usize {
+		match self {
+			Self::ClientHello { length, versions } => {
+				usize::try_from(*length).unwrap() + 2
+			}
+			Self::ServerHello { selected_version } => 2
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Cookie {
+	length: u16,
+	cookie: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+#[repr(u16)]
+pub(crate) enum SignatureScheme {
+	/* RSASSA-PKCS1-v1_5 algorithms */
+	rsa_pkcs1_sha256 = 0x0401,
+	rsa_pkcs1_sha384 = 0x0501,
+	rsa_pkcs1_sha512 = 0x0601,
+
+	/* ECDSA algorithms */
+	ecdsa_secp256r1_sha256 = 0x0403,
+	ecdsa_secp384r1_sha384 = 0x0503,
+	ecdsa_secp521r1_sha512 = 0x0603,
+
+	/* RSASSA-PSS algorithms with public key OID rsaEncryption */
+	rsa_pss_rsae_sha256 = 0x0804,
+	rsa_pss_rsae_sha384 = 0x0805,
+	rsa_pss_rsae_sha512 = 0x0806,
+
+	/* EdDSA algorithms */
+	ed25519 = 0x0807,
+	ed488 = 0x0808,
+
+	/* RSASSA-PSS algorithms with public key OID RSASSA-PSS */
+	rsa_pss_pss_sha256 = 0x0809,
+	rsa_pss_pss_sha384 = 0x080a,
+	rsa_pss_pss_sha512 = 0x080b,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SignatureSchemeList {
+	length: u16,
+	supported_signature_algorithms: Vec<SignatureScheme>,
+}
+
+impl SignatureSchemeList {
+	pub(crate) fn get_length(&self) -> usize {
+		2 + usize::try_from(self.length).unwrap()
+	}
+}
+
+#[derive(Debug, Clone)]
+#[repr(u16)]
+pub(crate) enum NamedGroup {
+	/* Elliptic Curve Groups (ECDHE) */
+	secp256r1 = 0x0017,
+	secp384r1 = 0x0018,
+	secp521r1 = 0x0019,
+	x25519 = 0x001D,
+	x448 = 0x001E,
+
+	/* Finite Field Groups (DHE) */
+	ffdhe2048 = 0x0100,
+	ffdhe3072 = 0x0101,
+	ffdhe4096 = 0x0102,
+	ffdhe6144 = 0x0103,
+	ffdhe8192 = 0x0104,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NamedGroupList {
+	length: u16,
+	named_group_list: Vec<NamedGroup>,
+}
+
+impl NamedGroupList {
+	pub(crate) fn get_length(&self) -> usize {
+		usize::try_from(self.length).unwrap() + 2
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct KeyShareEntry {
+	group: NamedGroup,
+	length: u16,
+	key_exchange: Vec<u8>,
+}
+
+impl KeyShareEntry {
+	pub(crate) fn get_length(&self) -> usize {
+		2 + 2 + usize::try_from(self.length).unwrap()
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum KeyShareEntryContent {
+	KeyShareClientHello {
+		length: u16,
+		client_shares: Vec<KeyShareEntry>,
+	},
+	KeyShareHelloRetryRequest {
+		selected_group: NamedGroup,
+	},
+	KeyShareServerHello {
+		server_share: KeyShareEntry,
+	}
+}
+
+impl KeyShareEntryContent {
+	pub(crate) fn get_length(&self) -> usize {
+		match self {
+			Self::KeyShareClientHello { length, client_shares } => 2 + usize::try_from(*length).unwrap(),
+			Self::KeyShareHelloRetryRequest { selected_group } => 2,
+			Self::KeyShareServerHello { server_share } => server_share.get_length(),
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+#[repr(u16)]
+pub(crate) enum NameType {
+	host_name = 0
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ServerNameContent {
+	HostName {
+		length: u16,
+		host_name: Vec<u8>,
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServerName {
+	name_type: NameType,
+	name: ServerNameContent,
 }
