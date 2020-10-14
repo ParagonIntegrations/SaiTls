@@ -15,12 +15,13 @@ use smoltcp::time::Instant;
 use smoltcp::phy::Device;
 
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use generic_array::GenericArray;
 
 use core::convert::TryInto;
 use core::convert::TryFrom;
 
 use rand_core::{RngCore, CryptoRng};
-use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret};
+use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret, ecdh::SharedSecret};
 
 use alloc::vec::{ self, Vec };
 
@@ -45,6 +46,10 @@ pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 	state: TlsState,
 	tcp_handle: SocketHandle,
 	rng: R,
+	secret: Option<EphemeralSecret>,	// Used enum Option to allow later init
+	session_id: Option<[u8; 32]>,		// init session specific field later
+	cipher_suite: Option<CipherSuite>,
+	ecdhe_shared: Option<SharedSecret>,
 }
 
 impl<R: RngCore + CryptoRng> TlsSocket<R> {
@@ -63,6 +68,10 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			state: TlsState::START,
 			tcp_handle,
 			rng,
+			secret: None,
+			session_id: None,
+			cipher_suite: None,
+			ecdhe_shared: None,
 		}
 	}
 
@@ -102,146 +111,170 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			}
 		}
 
-		if self.state == TlsState::START {
-//			// Create TLS representation, length and payload not finalised
-//			let mut random: [u8; 32] = [0; 32];
-//			self.rng.fill_bytes(&mut random);
-//			let mut session_id: [u8; 32] = [0; 32];
-//			self.rng.fill_bytes(&mut session_id);
-//
-//			let cipher_suites_length = 6;
-//			let cipher_suites = [
-//				CipherSuite::TLS_AES_128_GCM_SHA256,
-//				CipherSuite::TLS_AES_256_GCM_SHA384,
-//				CipherSuite::TLS_CHACHA20_POLY1305_SHA256,
-//			];
-//
-//			// Length: to be determined
-//			let supported_versions_extension = Extension {
-//				extension_type: ExtensionType::SupportedVersions,
-//				length: 5,
-//				extension_data: &[
-//					4,  // Number of supported versions * 2
-//					// Need 2 bytes to contain a version
-//					0x03, 0x04,		// 0x0304: TLS Version 1.3
-//					0x03, 0x03,		// 0x0303: TLS version 1.2
-//				]
-//			};
-//
-//			let signature_algorithms_extension = Extension {
-//				extension_type: ExtensionType::SignatureAlgorithms,
-//				length: 24,
-//				extension_data: &[
-//					0x00, 22,			// Length in bytes
-//					0x04, 0x03,			// ecdsa_secp256r1_sha256
-//					0x08, 0x07,			// ed25519
-//					0x08, 0x09,			// rsa_pss_pss_sha256
-//					0x04, 0x01,			// rsa_pkcs1_sha256
-//					0x08, 0x04,			// rsa_pss_rsae_sha256
-//					0x08, 0x0a,			// rsa_pss_pss_sha384
-//					0x05, 0x01,			// rsa_pkcs1_sha384
-//					0x08, 0x05,			// rsa_pss_rsae_sha384
-//					0x08, 0x0b,			// rsa_pss_pss_sha512
-//					0x06, 0x01,			// rsa_pkcs1_sha512
-//					0x08, 0x06,			// rsa_pss_rsae_sha512
-//				]
-//			};
-//
-//			let supported_groups_extension = Extension {
-//				extension_type: ExtensionType::SupportedGroups,
-//				length: 4,
-//				extension_data: &[
-//					0x00, 0x02,			// Length in bytes
-//					0x00, 0x17,			// secp256r1
-//				]
-//			};
-//
-//			let key_share_extension = Extension {
-//				extension_type: ExtensionType::KeyShare,
-//				length: 71,
-//				extension_data: &{
-//					let ecdh_secret = unsafe { EphemeralSecret::random(&mut self.rng) };
-//					let ecdh_public = EncodedPoint::from(&ecdh_secret);
-//					let x_coor = ecdh_public.x();
-//					let y_coor = ecdh_public.y().unwrap();
-//					let mut data: [u8; 71] = [0; 71];
-//					data[0..2].copy_from_slice(&[0x00, 69]);	// Length in bytes
-//					data[2..4].copy_from_slice(&[0x00, 0x17]);	// secp256r1
-//					data[4..6].copy_from_slice(&[0x00, 65]);	// key exchange length
-//					data[6..7].copy_from_slice(&[0x04]);		// Fixed legacy value
-//					data[7..39].copy_from_slice(&x_coor);
-//					data[39..71].copy_from_slice(&y_coor);
-//					data
-//				}
-//			};
-//
-//			let psk_key_exchange_modes_extension = Extension {
-//				extension_type: ExtensionType::PSKKeyExchangeModes,
-//				length: 2,
-//				extension_data: &[
-//					0x01,				// Length in bytes
-//					0x01,				// psk_dhe_ke
-//				]
-//			};
-//
-//			let mut client_hello = ClientHello {
-//				version: TlsVersion::Tls12,
-//				random,
-//				session_id_length: 32,
-//				session_id,
-//				cipher_suites_length,
-//				cipher_suites: &cipher_suites,
-//				compression_method_length: 1,
-//				compression_methods: 0,
-//				extension_length: supported_versions_extension.get_length().try_into().unwrap(),
-//				extensions: vec![
-//					supported_versions_extension,
-//					signature_algorithms_extension,
-//					supported_groups_extension,
-//					psk_key_exchange_modes_extension,
-//					key_share_extension
-//				]
-//			};
-//
-//			client_hello.extension_length = {
-//				let mut sum = 0;
-//				for ext in client_hello.extensions.iter() {
-//					sum += ext.get_length();
-//				}
-//				sum.try_into().unwrap()
-//			};
-//
-//			let handshake_repr = HandshakeRepr {
-//				msg_type: HandshakeType::ClientHello,
-//				length: client_hello.get_length(),
-//				handshake_data: HandshakeData::ClientHello(client_hello),
-//			};
-//
-//			let repr = TlsRepr {
-//				content_type: TlsContentType::Handshake,
-//				version: TlsVersion::Tls10,
-//				length: handshake_repr.get_length(),
-//				payload: None,
-//				handshake: Some(handshake_repr),
-//			};
-			let repr = TlsRepr::new()
-				.client_hello(&mut self.rng);
+		// Handle TLS handshake through TLS states
+		match self.state {
+			// Initiate TLS handshake
+			TlsState::START => {
+				// Prepare field that is randomised,
+				// Supply it to the TLS repr builder.
+				let ecdh_secret = EphemeralSecret::random(&mut self.rng);
+				let mut random: [u8; 32] = [0; 32];
+				let mut session_id: [u8; 32] = [0; 32];
+				self.rng.fill_bytes(&mut random);
+				self.rng.fill_bytes(&mut session_id);
+				let repr = TlsRepr::new()
+					.client_hello(&ecdh_secret, random, session_id);
+				self.send_tls_repr(sockets, repr)?;
 
-			log::info!("{:?}", repr);
+				// Store session settings, i.e. secret, session_id
+				self.secret = Some(ecdh_secret);
+				self.session_id = Some(session_id);
 
-			self.send_tls_repr(sockets, repr)?;
-			self.state = TlsState::WAIT_SH;
-			Ok(true)
-		} else if self.state == TlsState::WAIT_SH {
-			Ok(true)
-		} else {
-			Ok(true)
+				// Update the TLS state
+				self.state = TlsState::WAIT_SH;
+			},
+			// TLS Client wait for Server Hello
+			// No need to send anything
+			TlsState::WAIT_SH => {},
+			// TLS Client wait for certificate from TLS server
+			// No need to send anything
+			// Note: TLS server should normall send SH alongside EE
+			// TLS client should jump from WAIT_SH directly to WAIT_CERT_CR directly.
+			TlsState::WAIT_EE => {},
+			_ => todo!()
 		}
+
+		// Poll the network interface
+		iface.poll(sockets, now);
+
+		let mut array = [0; 2048];
+		let tls_repr_vec = self.recv_tls_repr(sockets, &mut array)?;
+
+		match self.state {
+			// During WAIT_SH for a TLS client, client should wait for ServerHello
+			TlsState::WAIT_SH => {
+
+				// "Cached" value.
+				// Loop forbids mutating the socket itself due to using a self-referenced vector
+				let mut cipher_suite: Option<CipherSuite> = None;
+				let mut ecdhe_shared: Option<SharedSecret> = None;
+				let mut state: TlsState = self.state;
+
+				// TLS Packets MUST be received in the same Ethernet frame in such order:
+				// 1. Server Hello
+				// 2. Change Cipher Spec
+				// 3. Encrypted Extensions
+				for (index, repr) in tls_repr_vec.iter().enumerate() {
+					// Legacy_protocol must be TLS 1.2
+					if repr.version != TlsVersion::Tls12 {
+						// Abort communication
+						todo!()
+					}
+
+					// TODO: Validate SH
+					if repr.is_server_hello() {
+						// Check SH content:
+						// random: Cannot represent HelloRequestRetry
+						//		(TODO: Support other key shares, e.g. X25519)
+						// session_id_echo: should be same as the one sent by client
+						// cipher_suite: Store
+						//		(TODO: Check if such suite was offered)
+						// compression_method: Must be null, not supported in TLS 1.3
+						//
+						// Check extensions:
+						// supported_version: Must be TLS 1.3
+						// key_share: Store key, must be in secp256r1
+						//		(TODO: Support other key shares ^)
+						let handshake_data = &repr.handshake.as_ref().unwrap().handshake_data;
+						if let HandshakeData::ServerHello(server_hello) = handshake_data {
+							// Check random: Cannot be SHA-256 of "HelloRetryRequest"
+							if server_hello.random == HRR_RANDOM {
+								// Abort communication
+								todo!()
+							}
+							// Check session_id_echo
+							// The socket should have a session_id after moving from START state
+							if self.session_id.unwrap() != server_hello.session_id_echo {
+								// Abort communication
+								todo!()
+							}
+							// Store the cipher suite
+							cipher_suite = Some(server_hello.cipher_suite);
+							if server_hello.compression_method != 0 {
+								// Abort communciation
+								todo!()
+							}
+							for extension in server_hello.extensions.iter() {
+								if extension.extension_type == ExtensionType::SupportedVersions {
+									if let ExtensionData::SupportedVersions(
+										SupportedVersions::ServerHello {
+											selected_version
+										}
+									) = extension.extension_data {
+										if selected_version != TlsVersion::Tls13 {
+											// Abort for choosing not offered TLS version
+											todo!()
+										}
+									} else {
+										// Abort for illegal extension
+										todo!()
+									}
+								}
+
+								if extension.extension_type == ExtensionType::KeyShare {
+									if let ExtensionData::KeyShareEntry(
+										KeyShareEntryContent::KeyShareServerHello {
+											server_share
+										}
+									) = &extension.extension_data {
+										// TODO: Use legitimate checking to ensure the chosen
+										// group is indeed acceptable, when allowing more (EC)DHE
+										// key sharing
+										if server_share.group != NamedGroup::secp256r1 {
+											// Abort for wrong key sharing
+											todo!()
+										}
+										// Store key
+										// It is surely from secp256r1
+										// Convert untagged bytes into encoded point on p256 eliptic curve
+										// Slice the first byte out of the bytes
+										let server_public = EncodedPoint::from_untagged_bytes(
+											GenericArray::from_slice(&server_share.key_exchange[1..])
+										);
+										// TODO: Handle improper shared key
+										ecdhe_shared = Some(
+											self.secret.as_ref().unwrap()
+												.diffie_hellman(&server_public)
+												.expect("Unsupported key")
+										);
+									}
+								}
+							}
+							state = TlsState::WAIT_EE;
+
+						} else {
+							// Handle invalid TLS packet
+							todo!()
+						}
+
+					}
+				}
+				self.cipher_suite = cipher_suite;
+				self.ecdhe_shared = ecdhe_shared;
+				self.state = state;
+			}
+			_ => {},
+		}
+
+		Ok(self.state == TlsState::CONNECTED)
 	}
 
 	// Generic inner send method, through TCP socket
-	fn send_tls_repr(&mut self, sockets: &mut SocketSet, tls_repr: TlsRepr) -> Result<()> {
+	fn send_tls_repr(&self, sockets: &mut SocketSet, tls_repr: TlsRepr) -> Result<()> {
 		let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+		if !tcp_socket.can_send() {
+			return Err(Error::Illegal);
+		}
 		let mut array = [0; 2048];
 		let mut buffer = TlsBuffer::new(&mut array);
 		buffer.enqueue_tls_repr(tls_repr)?;
@@ -257,12 +290,17 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 	}
 
 	// Generic inner recv method, through TCP socket
-	fn recv_tls_repr<'a>(&'a mut self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec::<TlsRepr>> {
+	// A TCP packet can contain multiple TLS segments
+	fn recv_tls_repr<'a>(&'a self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec::<TlsRepr>> {
 		let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
-		tcp_socket.recv_slice(byte_array)?;
+		if !tcp_socket.can_recv() {
+			return Ok((Vec::new()));
+		}
+
+		let array_size = tcp_socket.recv_slice(byte_array)?;
 		let mut vec: Vec<TlsRepr> = Vec::new();
 
-		let mut bytes: &[u8] = byte_array;
+		let mut bytes: &[u8] = &byte_array[..array_size];
 		loop {
 			match parse_tls_repr(bytes) {
 				Ok((rest, repr)) => {
@@ -396,7 +434,6 @@ impl<'a> TlsBuffer<'a> {
 		for extension in extensions {
 			self.write_u16(extension.extension_type.into())?;
 			self.write_u16(extension.length)?;
-//			self.write(extension.extension_data)?;
 			self.enqueue_extension_data(extension.extension_data)?;
 		}
 		Ok(())
@@ -409,7 +446,7 @@ impl<'a> TlsBuffer<'a> {
 				use crate::tls_packet::SupportedVersions::*;
 				match s {
 					ClientHello { length, versions } => {
-						self.write_u16(length)?;
+						self.write_u8(length)?;
 						for version in versions.iter() {
 							self.write_u16((*version).into())?;
 						}
@@ -432,10 +469,10 @@ impl<'a> TlsBuffer<'a> {
 				}
 			},
 			KeyShareEntry(k) => {
-				let key_share_entry_into = |entry: crate::tls_packet::KeyShareEntry| {
-					self.write_u16(entry.group.into())?;
-					self.write_u16(entry.length)?;
-					self.write(entry.key_exchange.as_slice())
+				let mut key_share_entry_into = |buffer: &mut TlsBuffer, entry: crate::tls_packet::KeyShareEntry| {
+					buffer.write_u16(entry.group.into())?;
+					buffer.write_u16(entry.length)?;
+					buffer.write(entry.key_exchange.as_slice())
 				};
 
 				use crate::tls_packet::KeyShareEntryContent::*;
@@ -443,14 +480,14 @@ impl<'a> TlsBuffer<'a> {
 					KeyShareClientHello { length, client_shares } => {
 						self.write_u16(length)?;
 						for share in client_shares.iter() {
-							key_share_entry_into(*share)?;
+							self.enqueue_key_share_entry(share)?;
 						}
 					}
 					KeyShareHelloRetryRequest { selected_group } => {
 						self.write_u16(selected_group.into())?;
 					}
 					KeyShareServerHello { server_share } => {
-						key_share_entry_into(server_share)?;
+						self.enqueue_key_share_entry(&server_share)?;
 					}
 				}
 			},
@@ -459,6 +496,12 @@ impl<'a> TlsBuffer<'a> {
 			_ => todo!()
 		};
 		Ok(())
+	}
+
+	fn enqueue_key_share_entry(&mut self, entry: &crate::tls_packet::KeyShareEntry) -> Result<()> {
+		self.write_u16(entry.group.into())?;
+		self.write_u16(entry.length)?;
+		self.write(entry.key_exchange.as_slice())
 	}
 }
 

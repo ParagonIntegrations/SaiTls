@@ -12,6 +12,13 @@ use core::convert::TryInto;
 
 use alloc::vec::Vec;
 
+pub(crate) const HRR_RANDOM: [u8; 32] = [
+	0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+	0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+	0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+	0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C
+];
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub(crate) enum TlsContentType {
@@ -54,20 +61,34 @@ impl<'a> TlsRepr<'a> {
 		}
 	}
 
-	pub(crate) fn client_hello<T>(mut self, rng: &mut T) -> Self
-	where
-		T: RngCore + CryptoRng
-	{
+	pub(crate) fn client_hello(mut self, secret: &EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
 		self.content_type = TlsContentType::Handshake;
 		self.version = TlsVersion::Tls10;
-		self.handshake = Some({
+		let handshake_repr = {
 			let mut repr = HandshakeRepr::new();
+			repr.msg_type = HandshakeType::ClientHello;
 			repr.handshake_data = HandshakeData::ClientHello({
-				ClientHello::new(rng)
+				ClientHello::new(secret, random, session_id)
 			});
+			repr.length = repr.handshake_data.get_length().try_into().unwrap();
 			repr
-		});
+		};
+		self.length = handshake_repr.get_length();
+		self.handshake = Some(handshake_repr);
 		self
+	}
+
+	pub(crate) fn is_server_hello(&self) -> bool {
+		self.content_type == TlsContentType::Handshake &&
+		self.payload.is_none() &&
+		self.handshake.is_some() &&
+		{
+			if let Some(repr) = &self.handshake {
+				repr.msg_type == HandshakeType::ServerHello
+			} else {
+				false
+			}
+		}
 	}
 }
 
@@ -146,7 +167,7 @@ pub(crate) enum HandshakeData<'a> {
 }
 
 impl<'a> HandshakeData<'a> {
-	pub(crate) fn get_length(&self) -> u32 {
+	pub(crate) fn get_length(&self) -> usize {
 		match self {
 			HandshakeData::ClientHello(data) => data.get_length(),
 			HandshakeData::ServerHello(data) => todo!(),
@@ -156,16 +177,13 @@ impl<'a> HandshakeData<'a> {
 }
 
 impl<'a> ClientHello<'a> {
-	pub(self) fn new<T>(rng: &mut T) -> Self
-	where
-		T: RngCore + CryptoRng
-	{
+	pub(self) fn new(secret: &EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
 		let mut client_hello = ClientHello {
 			version: TlsVersion::Tls12,
-			random: [0; 32],
+			random,
 			session_id_length: 32,
-			session_id: [0; 32],
-			cipher_suites_length: 0,
+			session_id,
+			cipher_suites_length: 6,
 			cipher_suites: &[
 				CipherSuite::TLS_AES_128_GCM_SHA256,
 				CipherSuite::TLS_AES_256_GCM_SHA384,
@@ -177,14 +195,10 @@ impl<'a> ClientHello<'a> {
 			extensions: Vec::new(),
 		};
 
-		rng.fill_bytes(&mut client_hello.random);
-		rng.fill_bytes(&mut client_hello.session_id);
-
-		client_hello.add_ch_supported_versions();
-		client_hello.add_sig_algs();
-		client_hello.add_client_groups_with_key_shares(&mut rng);
-		
-		client_hello
+		client_hello.add_ch_supported_versions()
+			.add_sig_algs()
+			.add_client_groups_with_key_shares(secret)
+			.finalise()
 	}
 
 	pub(crate) fn add_ch_supported_versions(mut self) -> Self {
@@ -263,10 +277,7 @@ impl<'a> ClientHello<'a> {
 		self
 	}
 
-	pub(crate) fn add_client_groups_with_key_shares<T>(mut self, rng: &mut T) -> Self
-	where
-		T: RngCore + CryptoRng
-	{
+	pub(crate) fn add_client_groups_with_key_shares(mut self, ecdh_secret: &EphemeralSecret) -> Self {
 		// List out all supported groups
 		let mut list = Vec::new();
 		list.push(NamedGroup::secp256r1);
@@ -280,9 +291,7 @@ impl<'a> ClientHello<'a> {
 			let mut key_exchange = Vec::new();
 			let key_share_entry = match named_group {
 				NamedGroup::secp256r1 => {
-					let ecdh_secret = EphemeralSecret::random(&mut rng);
-					let ecdh_public = EncodedPoint::from(&ecdh_secret);
-					
+					let ecdh_public = EncodedPoint::from(ecdh_secret);
 					let x_coor = ecdh_public.x();
 					let y_coor = ecdh_public.y().unwrap();
 
@@ -319,6 +328,7 @@ impl<'a> ClientHello<'a> {
 			extension_data,
 		};
 
+		let length = list.len()*2;
 		let group_list = NamedGroupList {
 			length: length.try_into().unwrap(),
 			named_group_list: list,
@@ -336,19 +346,27 @@ impl<'a> ClientHello<'a> {
 		self
 	}
 
-	pub(crate) fn get_length(&self) -> u32 {
-		let mut length :u32 = 2;                    // TlsVersion size
+	pub(crate) fn finalise(mut self) -> Self {
+		let mut sum = 0;
+		for extension in self.extensions.iter() {
+			// TODO: Add up the extension length
+			sum += extension.get_length();
+		}
+		self.extension_length = sum.try_into().unwrap();
+		self
+	}
+
+	pub(crate) fn get_length(&self) -> usize {
+		let mut length: usize = 2;                    // TlsVersion size
 		length += 32;      // Random size
 		length += 1;                                     // Legacy session_id length size
 		length += 32;          // Legacy session_id size
 		length += 2;                                     // Cipher_suites_length size
-		length += (self.cipher_suites.len() as u32) * 2;
+		length += self.cipher_suites.len() * 2;
 		length += 1;
 		length += 1;
 		length += 2;
-		for extension in self.extensions.iter() {
-			length += (extension.get_length() as u32);
-		}
+		length += usize::try_from(self.extension_length).unwrap();
 		length
 	}
 }
@@ -439,7 +457,7 @@ impl ExtensionData {
 #[derive(Debug, Clone)]
 pub(crate) enum SupportedVersions {
 	ClientHello {
-		length: u16,
+		length: u8,
 		versions: Vec<TlsVersion>,
 	},
 	ServerHello {
@@ -451,7 +469,7 @@ impl SupportedVersions {
 	pub(crate) fn get_length(&self) -> usize {
 		match self {
 			Self::ClientHello { length, versions } => {
-				usize::try_from(*length).unwrap() + 2
+				usize::try_from(*length).unwrap() + 1
 			}
 			Self::ServerHello { selected_version } => 2
 		}
