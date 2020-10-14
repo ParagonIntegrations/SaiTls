@@ -19,6 +19,7 @@ use generic_array::GenericArray;
 
 use core::convert::TryInto;
 use core::convert::TryFrom;
+use core::cell::RefCell;
 
 use rand_core::{RngCore, CryptoRng};
 use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret, ecdh::SharedSecret};
@@ -43,13 +44,13 @@ enum TlsState {
 
 pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 {
-	state: TlsState,
+	state: RefCell<TlsState>,
 	tcp_handle: SocketHandle,
 	rng: R,
-	secret: Option<EphemeralSecret>,	// Used enum Option to allow later init
-	session_id: Option<[u8; 32]>,		// init session specific field later
-	cipher_suite: Option<CipherSuite>,
-	ecdhe_shared: Option<SharedSecret>,
+	secret: RefCell<Option<EphemeralSecret>>,	// Used enum Option to allow later init
+	session_id: RefCell<Option<[u8; 32]>>,		// init session specific field later
+	cipher_suite: RefCell<Option<CipherSuite>>,
+	ecdhe_shared: RefCell<Option<SharedSecret>>,
 }
 
 impl<R: RngCore + CryptoRng> TlsSocket<R> {
@@ -65,13 +66,13 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		let tcp_socket = TcpSocket::new(rx_buffer, tx_buffer);
 		let tcp_handle = sockets.add(tcp_socket);
 		TlsSocket {
-			state: TlsState::START,
+			state: RefCell::new(TlsState::START),
 			tcp_handle,
 			rng,
-			secret: None,
-			session_id: None,
-			cipher_suite: None,
-			ecdhe_shared: None,
+			secret: RefCell::new(None),
+			session_id: RefCell::new(None),
+			cipher_suite: RefCell::new(None),
+			ecdhe_shared: RefCell::new(None),
 		}
 	}
 
@@ -112,7 +113,8 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		}
 
 		// Handle TLS handshake through TLS states
-		match self.state {
+		let state = self.state.clone().into_inner();
+		match state {
 			// Initiate TLS handshake
 			TlsState::START => {
 				// Prepare field that is randomised,
@@ -127,11 +129,11 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				self.send_tls_repr(sockets, repr)?;
 
 				// Store session settings, i.e. secret, session_id
-				self.secret = Some(ecdh_secret);
-				self.session_id = Some(session_id);
+				self.secret.replace(Some(ecdh_secret));
+				self.session_id.replace(Some(session_id));
 
 				// Update the TLS state
-				self.state = TlsState::WAIT_SH;
+				self.state.replace(TlsState::WAIT_SH);
 			},
 			// TLS Client wait for Server Hello
 			// No need to send anything
@@ -147,126 +149,121 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		// Poll the network interface
 		iface.poll(sockets, now);
 
-		let mut array = [0; 2048];
+		// Read for TLS packet
+		let mut array: [u8; 2048] = [0; 2048];
 		let tls_repr_vec = self.recv_tls_repr(sockets, &mut array)?;
 
-		match self.state {
+		for repr in tls_repr_vec.iter() {
+			self.process(repr)?;
+		}
+
+		Ok(self.state.clone().into_inner() == TlsState::CONNECTED)
+	}
+
+	// Process TLS ingress during handshake
+	fn process(&self, repr: &TlsRepr) -> Result<()> {
+		let state = self.state.clone().into_inner();
+		match state {
 			// During WAIT_SH for a TLS client, client should wait for ServerHello
 			TlsState::WAIT_SH => {
+				// Legacy_protocol must be TLS 1.2
+				if repr.version != TlsVersion::Tls12 {
+					// Abort communication
+					todo!()
+				}
 
-				// "Cached" value.
-				// Loop forbids mutating the socket itself due to using a self-referenced vector
-				let mut cipher_suite: Option<CipherSuite> = None;
-				let mut ecdhe_shared: Option<SharedSecret> = None;
-				let mut state: TlsState = self.state;
+				// TODO: Validate SH
+				if repr.is_server_hello() {
+					// Check SH content:
+					// random: Cannot represent HelloRequestRetry
+					//		(TODO: Support other key shares, e.g. X25519)
+					// session_id_echo: should be same as the one sent by client
+					// cipher_suite: Store
+					//		(TODO: Check if such suite was offered)
+					// compression_method: Must be null, not supported in TLS 1.3
+					//
+					// Check extensions:
+					// supported_version: Must be TLS 1.3
+					// key_share: Store key, must be in secp256r1
+					//		(TODO: Support other key shares ^)
+					let handshake_data = &repr.handshake.as_ref().unwrap().handshake_data;
+					if let HandshakeData::ServerHello(server_hello) = handshake_data {
+						// Check random: Cannot be SHA-256 of "HelloRetryRequest"
+						if server_hello.random == HRR_RANDOM {
+							// Abort communication
+							todo!()
+						}
+						// Check session_id_echo
+						// The socket should have a session_id after moving from START state
+						if self.session_id.clone().into_inner().unwrap() != server_hello.session_id_echo {
+							// Abort communication
+							todo!()
+						}
+						// Store the cipher suite
+						self.cipher_suite.replace(Some(server_hello.cipher_suite));
+						if server_hello.compression_method != 0 {
+							// Abort communciation
+							todo!()
+						}
+						for extension in server_hello.extensions.iter() {
+							if extension.extension_type == ExtensionType::SupportedVersions {
+								if let ExtensionData::SupportedVersions(
+									SupportedVersions::ServerHello {
+										selected_version
+									}
+								) = extension.extension_data {
+									if selected_version != TlsVersion::Tls13 {
+										// Abort for choosing not offered TLS version
+										todo!()
+									}
+								} else {
+									// Abort for illegal extension
+									todo!()
+								}
+							}
 
-				// TLS Packets MUST be received in the same Ethernet frame in such order:
-				// 1. Server Hello
-				// 2. Change Cipher Spec
-				// 3. Encrypted Extensions
-				for (index, repr) in tls_repr_vec.iter().enumerate() {
-					// Legacy_protocol must be TLS 1.2
-					if repr.version != TlsVersion::Tls12 {
-						// Abort communication
+							if extension.extension_type == ExtensionType::KeyShare {
+								if let ExtensionData::KeyShareEntry(
+									KeyShareEntryContent::KeyShareServerHello {
+										server_share
+									}
+								) = &extension.extension_data {
+									// TODO: Use legitimate checking to ensure the chosen
+									// group is indeed acceptable, when allowing more (EC)DHE
+									// key sharing
+									if server_share.group != NamedGroup::secp256r1 {
+										// Abort for wrong key sharing
+										todo!()
+									}
+									// Store key
+									// It is surely from secp256r1
+									// Convert untagged bytes into encoded point on p256 eliptic curve
+									// Slice the first byte out of the bytes
+									let server_public = EncodedPoint::from_untagged_bytes(
+										GenericArray::from_slice(&server_share.key_exchange[1..])
+									);
+									// TODO: Handle improper shared key
+									self.ecdhe_shared.replace(Some(
+										self.secret.borrow().as_ref().unwrap()
+											.diffie_hellman(&server_public)
+											.expect("Unsupported key")
+									));
+								}
+							}
+						}
+						self.state.replace(TlsState::WAIT_EE);
+
+					} else {
+						// Handle invalid TLS packet
 						todo!()
 					}
 
-					// TODO: Validate SH
-					if repr.is_server_hello() {
-						// Check SH content:
-						// random: Cannot represent HelloRequestRetry
-						//		(TODO: Support other key shares, e.g. X25519)
-						// session_id_echo: should be same as the one sent by client
-						// cipher_suite: Store
-						//		(TODO: Check if such suite was offered)
-						// compression_method: Must be null, not supported in TLS 1.3
-						//
-						// Check extensions:
-						// supported_version: Must be TLS 1.3
-						// key_share: Store key, must be in secp256r1
-						//		(TODO: Support other key shares ^)
-						let handshake_data = &repr.handshake.as_ref().unwrap().handshake_data;
-						if let HandshakeData::ServerHello(server_hello) = handshake_data {
-							// Check random: Cannot be SHA-256 of "HelloRetryRequest"
-							if server_hello.random == HRR_RANDOM {
-								// Abort communication
-								todo!()
-							}
-							// Check session_id_echo
-							// The socket should have a session_id after moving from START state
-							if self.session_id.unwrap() != server_hello.session_id_echo {
-								// Abort communication
-								todo!()
-							}
-							// Store the cipher suite
-							cipher_suite = Some(server_hello.cipher_suite);
-							if server_hello.compression_method != 0 {
-								// Abort communciation
-								todo!()
-							}
-							for extension in server_hello.extensions.iter() {
-								if extension.extension_type == ExtensionType::SupportedVersions {
-									if let ExtensionData::SupportedVersions(
-										SupportedVersions::ServerHello {
-											selected_version
-										}
-									) = extension.extension_data {
-										if selected_version != TlsVersion::Tls13 {
-											// Abort for choosing not offered TLS version
-											todo!()
-										}
-									} else {
-										// Abort for illegal extension
-										todo!()
-									}
-								}
-
-								if extension.extension_type == ExtensionType::KeyShare {
-									if let ExtensionData::KeyShareEntry(
-										KeyShareEntryContent::KeyShareServerHello {
-											server_share
-										}
-									) = &extension.extension_data {
-										// TODO: Use legitimate checking to ensure the chosen
-										// group is indeed acceptable, when allowing more (EC)DHE
-										// key sharing
-										if server_share.group != NamedGroup::secp256r1 {
-											// Abort for wrong key sharing
-											todo!()
-										}
-										// Store key
-										// It is surely from secp256r1
-										// Convert untagged bytes into encoded point on p256 eliptic curve
-										// Slice the first byte out of the bytes
-										let server_public = EncodedPoint::from_untagged_bytes(
-											GenericArray::from_slice(&server_share.key_exchange[1..])
-										);
-										// TODO: Handle improper shared key
-										ecdhe_shared = Some(
-											self.secret.as_ref().unwrap()
-												.diffie_hellman(&server_public)
-												.expect("Unsupported key")
-										);
-									}
-								}
-							}
-							state = TlsState::WAIT_EE;
-
-						} else {
-							// Handle invalid TLS packet
-							todo!()
-						}
-
-					}
 				}
-				self.cipher_suite = cipher_suite;
-				self.ecdhe_shared = ecdhe_shared;
-				self.state = state;
 			}
 			_ => {},
 		}
 
-		Ok(self.state == TlsState::CONNECTED)
+		Ok(())
 	}
 
 	// Generic inner send method, through TCP socket
