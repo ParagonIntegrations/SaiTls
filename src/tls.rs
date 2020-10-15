@@ -335,12 +335,31 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 										.diffie_hellman(&server_public)
 										.expect("Unsupported key");
 									let cipher = match selected_cipher {
+										CipherSuite::TLS_AES_128_GCM_SHA256 => {
+											Cipher::TLS_AES_128_GCM_SHA256(
+												todo!()
+											)
+										},
 										CipherSuite::TLS_AES_256_GCM_SHA384 => {
 											Cipher::TLS_AES_256_GCM_SHA384(
 												Aes256Gcm::new(shared.as_bytes())
 											)
+										},
+										CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
+											Cipher::TLS_CHACHA20_POLY1305_SHA256(
+												ChaCha20Poly1305::new(shared.as_bytes())
+											)
+										},
+										CipherSuite::TLS_AES_128_CCM_SHA256 => {
+											Cipher::TLS_AES_128_CCM_SHA256(
+												todo!()
+											)
+										},
+										// CCM_8 is not supported
+										// TODO: Abort communication
+										CipherSuite::TLS_AES_128_CCM_8_SHA256 => {
+											todo!()
 										}
-										_ => todo!()
 									};
 									self.cipher.replace(Some(cipher));
 								}
