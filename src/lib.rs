@@ -11,5 +11,7 @@ pub mod parse;
 // Details: Encapsulate smoltcp & nom errors
 pub enum Error {
     PropagatedError(smoltcp::Error),
-    ParsingError()
+    ParsingError,
+    EncryptionError,
+    CapacityError,
 }

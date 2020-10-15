@@ -23,9 +23,15 @@ use core::cell::RefCell;
 
 use rand_core::{RngCore, CryptoRng};
 use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret, ecdh::SharedSecret};
+use aes_gcm::{Aes128Gcm, Aes256Gcm};
+use chacha20poly1305::{ChaCha20Poly1305, Key};
+use ccm::{Ccm, consts::*};
+use aes_gcm::aes::Aes128;
+use aes_gcm::{AeadInPlace, NewAead};
 
 use alloc::vec::{ self, Vec };
 
+use crate::Error as TlsError;
 use crate::tls_packet::*;
 use crate::parse::parse_tls_repr;
 
@@ -42,6 +48,7 @@ enum TlsState {
 	CONNECTED,
 }
 
+// TODO: Group up all session_specific parameters into a separate structure
 pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 {
 	state: RefCell<TlsState>,
@@ -49,9 +56,75 @@ pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 	rng: R,
 	secret: RefCell<Option<EphemeralSecret>>,	// Used enum Option to allow later init
 	session_id: RefCell<Option<[u8; 32]>>,		// init session specific field later
-	cipher_suite: RefCell<Option<CipherSuite>>,
-	ecdhe_shared: RefCell<Option<SharedSecret>>,
+	received_change_cipher_spec: RefCell<Option<bool>>,
+	cipher: RefCell<Option<Cipher>>,
 }
+
+pub(crate) enum Cipher {
+	TLS_AES_128_GCM_SHA256(Aes128Gcm),
+	TLS_AES_256_GCM_SHA384(Aes256Gcm),
+	TLS_CHACHA20_POLY1305_SHA256(ChaCha20Poly1305),
+	TLS_AES_128_CCM_SHA256(Ccm<Aes128, U16, U12>)
+}
+
+macro_rules! impl_cipher {
+	($($cipher_name: ident),+) => {
+		impl Cipher {
+			pub(crate) fn encrypt<T>(&self, rng: &mut T, associated_data: &[u8], buffer: &mut Vec<u8>) -> core::result::Result<(), TlsError>
+			where
+				T: RngCore + CryptoRng
+			{
+				// All 4 supported Ciphers use a nonce of 12 bytes
+				let mut nonce_array: [u8; 12] = [0; 12];
+				rng.fill_bytes(&mut nonce_array);
+				use Cipher::*;
+				match self {
+					$(
+						$cipher_name(cipher) => {
+							cipher.encrypt_in_place(
+								&GenericArray::from_slice(&nonce_array),
+								associated_data,
+								buffer
+							).map_err(
+								|_| TlsError::EncryptionError
+							)
+						}
+					)+
+				}
+			}
+
+			pub(crate) fn decrypt<T>(&self, rng: &mut T, associated_data: &[u8], buffer: &mut Vec<u8>) -> core::result::Result<(), TlsError>
+			where
+				T: RngCore + CryptoRng
+			{
+				// All 4 supported Ciphers use a nonce of 12 bytes
+				let mut nonce_array: [u8; 12] = [0; 12];
+				rng.fill_bytes(&mut nonce_array);
+				use Cipher::*;
+				match self {
+					$(
+						$cipher_name(cipher) => {
+							cipher.decrypt_in_place(
+								&GenericArray::from_slice(&nonce_array),
+								associated_data,
+								buffer
+							).map_err(
+								|_| TlsError::EncryptionError
+							)
+						}
+					)+
+				}
+			}
+		}
+	}
+}
+
+impl_cipher!(
+	TLS_AES_128_GCM_SHA256,
+	TLS_AES_256_GCM_SHA384,
+	TLS_CHACHA20_POLY1305_SHA256,
+	TLS_AES_128_CCM_SHA256
+);
 
 impl<R: RngCore + CryptoRng> TlsSocket<R> {
 	pub fn new<'a, 'b, 'c>(
@@ -71,8 +144,8 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			rng,
 			secret: RefCell::new(None),
 			session_id: RefCell::new(None),
-			cipher_suite: RefCell::new(None),
-			ecdhe_shared: RefCell::new(None),
+			received_change_cipher_spec: RefCell::new(None),
+			cipher: RefCell::new(None),
 		}
 	}
 
@@ -131,6 +204,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				// Store session settings, i.e. secret, session_id
 				self.secret.replace(Some(ecdh_secret));
 				self.session_id.replace(Some(session_id));
+				self.received_change_cipher_spec.replace(Some(false));
 
 				// Update the TLS state
 				self.state.replace(TlsState::WAIT_SH);
@@ -163,6 +237,18 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 	// Process TLS ingress during handshake
 	fn process(&self, repr: &TlsRepr) -> Result<()> {
 		let state = self.state.clone().into_inner();
+
+		// Change_cipher_spec check:
+		// Must receive CCS before recv peer's FINISH message
+		// i.e. Must happen after START and before CONNECTED
+		//
+		// CCS message only exist for compatibility reason,
+		// Drop the message and update `received_change_cipher_spec`
+		if repr.is_change_cipher_spec() {
+			self.received_change_cipher_spec.replace(Some(true));
+			return Ok(())
+		}
+
 		match state {
 			// During WAIT_SH for a TLS client, client should wait for ServerHello
 			TlsState::WAIT_SH => {
@@ -200,7 +286,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 							todo!()
 						}
 						// Store the cipher suite
-						self.cipher_suite.replace(Some(server_hello.cipher_suite));
+						let selected_cipher = server_hello.cipher_suite;
 						if server_hello.compression_method != 0 {
 							// Abort communciation
 							todo!()
@@ -236,18 +322,27 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 										todo!()
 									}
 									// Store key
-									// It is surely from secp256r1
+									// It is surely from secp256r1, no other groups are permitted
 									// Convert untagged bytes into encoded point on p256 eliptic curve
 									// Slice the first byte out of the bytes
 									let server_public = EncodedPoint::from_untagged_bytes(
 										GenericArray::from_slice(&server_share.key_exchange[1..])
 									);
 									// TODO: Handle improper shared key
-									self.ecdhe_shared.replace(Some(
-										self.secret.borrow().as_ref().unwrap()
-											.diffie_hellman(&server_public)
-											.expect("Unsupported key")
-									));
+									// Right now is causes a panic, only socket abort is needed
+									let secret = self.secret.replace(None);
+									let shared = secret.unwrap()
+										.diffie_hellman(&server_public)
+										.expect("Unsupported key");
+									let cipher = match selected_cipher {
+										CipherSuite::TLS_AES_256_GCM_SHA384 => {
+											Cipher::TLS_AES_256_GCM_SHA384(
+												Aes256Gcm::new(shared.as_bytes())
+											)
+										}
+										_ => todo!()
+									};
+									self.cipher.replace(Some(cipher));
 								}
 							}
 						}
@@ -259,7 +354,14 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 					}
 
 				}
-			}
+			},
+
+			// Expect encrypted extensions after receiving SH
+			TlsState::WAIT_EE => {
+				// ExcepytedExtensions are disguised as ApplicationData
+				// Pull out the `payload` from TlsRepr, decrypt as EE
+			},
+
 			_ => {},
 		}
 

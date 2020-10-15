@@ -5,7 +5,7 @@ use num_enum::TryFromPrimitive;
 use rand_core::RngCore;
 use rand_core::CryptoRng;
 
-use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret};
+use p256::{EncodedPoint, AffinePoint, ecdh::{EphemeralSecret, SharedSecret}};
 
 use core::convert::TryFrom;
 use core::convert::TryInto;
@@ -90,6 +90,23 @@ impl<'a> TlsRepr<'a> {
 			}
 		}
 	}
+
+	pub(crate) fn is_change_cipher_spec(&self) -> bool {
+		self.content_type == TlsContentType::ChangeCipherSpec &&
+		self.handshake.is_none() &&
+		self.payload.is_some() &&
+		{
+			if let Some(data) = self.payload {
+				[0x01] == data
+			} else {
+				false
+			}
+		}
+	}
+
+	pub(crate) fn decrypt_ee(&self, shared_secret: &SharedSecret) -> HandshakeRepr {
+		todo!()
+	}
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -164,6 +181,7 @@ pub(crate) enum HandshakeData<'a> {
 	Uninitialized,
 	ClientHello(ClientHello<'a>),
 	ServerHello(ServerHello<'a>),
+	ExcryptedExtensions(EncryptedExtensions),
 }
 
 impl<'a> HandshakeData<'a> {
@@ -381,6 +399,12 @@ pub(crate) struct ServerHello<'a> {
 	pub(crate) compression_method: u8,     // Always 0
 	pub(crate) extension_length: u16,
 	pub(crate) extensions: Vec<Extension>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EncryptedExtensions {
+	length: u16,
+	extensions: Vec<Extension>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
