@@ -6,8 +6,9 @@ extern crate alloc;
 pub mod tls;
 pub mod tls_packet;
 pub mod parse;
-pub mod cipher;
+pub mod cipher_suite;
 pub mod buffer;
+pub mod key;
 
 // TODO: Implement errors
 // Details: Encapsulate smoltcp & nom errors

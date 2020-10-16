@@ -28,13 +28,14 @@ use chacha20poly1305::{ChaCha20Poly1305, Key};
 use ccm::{Ccm, consts::*};
 use aes_gcm::aes::Aes128;
 use aes_gcm::{AeadInPlace, NewAead};
+use sha2::{Sha256, Sha384, Sha512, Digest};
 
 use alloc::vec::{ self, Vec };
 
 use crate::Error as TlsError;
 use crate::tls_packet::*;
 use crate::parse::parse_tls_repr;
-use crate::cipher::Cipher;
+use crate::cipher_suite::CipherSuite;
 use crate::buffer::TlsBuffer;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -59,7 +60,8 @@ pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 	secret: RefCell<Option<EphemeralSecret>>,	// Used enum Option to allow later init
 	session_id: RefCell<Option<[u8; 32]>>,		// init session specific field later
 	received_change_cipher_spec: RefCell<Option<bool>>,
-	cipher: RefCell<Option<Cipher>>,
+	cipher: RefCell<Option<CipherSuite>>,
+	handshake_sha256: RefCell<Sha256>,
 }
 
 impl<R: RngCore + CryptoRng> TlsSocket<R> {
@@ -82,6 +84,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			session_id: RefCell::new(None),
 			received_change_cipher_spec: RefCell::new(None),
 			cipher: RefCell::new(None),
+			handshake_sha256: RefCell::new(Sha256::new()),
 		}
 	}
 
@@ -135,7 +138,19 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				self.rng.fill_bytes(&mut session_id);
 				let repr = TlsRepr::new()
 					.client_hello(&ecdh_secret, random, session_id);
-				self.send_tls_repr(sockets, repr)?;
+
+				// Update hash function with client hello handshake
+				let mut array = [0; 2048];
+				let mut buffer = TlsBuffer::new(&mut array);
+				buffer.enqueue_tls_repr(repr)?;
+				let slice: &[u8] = buffer.into();
+
+				// Update hash by handshake
+				// Update with entire packet except the record layer
+				{
+					self.handshake_sha256.borrow_mut().update(&slice[5..]);
+				}
+				self.send_tls_slice(sockets, slice)?;
 
 				// Store session settings, i.e. secret, session_id
 				self.secret.replace(Some(ecdh_secret));
@@ -161,9 +176,13 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
 		// Read for TLS packet
 		let mut array: [u8; 2048] = [0; 2048];
-		let tls_repr_vec = self.recv_tls_repr(sockets, &mut array)?;
+		let mut tls_repr_vec = self.recv_tls_repr(sockets, &mut array)?;
 
-		for repr in tls_repr_vec.iter() {
+		// Take the TLS representation out of the vector,
+		// Process as a queue
+		let tls_repr_vec_size = tls_repr_vec.len();
+		for index in 0..tls_repr_vec_size {
+			let repr = tls_repr_vec.remove(0);
 			self.process(repr)?;
 		}
 
@@ -171,7 +190,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 	}
 
 	// Process TLS ingress during handshake
-	fn process(&self, repr: &TlsRepr) -> Result<()> {
+	fn process(&self, repr: TlsRepr) -> Result<()> {
 		let state = self.state.clone().into_inner();
 
 		// Change_cipher_spec check:
@@ -270,44 +289,58 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 									let shared = secret.unwrap()
 										.diffie_hellman(&server_public)
 										.expect("Unsupported key");
-									let cipher = match selected_cipher {
-										CipherSuite::TLS_AES_128_GCM_SHA256 => {
-											Cipher::TLS_AES_128_GCM_SHA256(
-												todo!()
-											)
-										},
-										CipherSuite::TLS_AES_256_GCM_SHA384 => {
-											Cipher::TLS_AES_256_GCM_SHA384(
-												Aes256Gcm::new(shared.as_bytes())
-											)
-										},
-										CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
-											Cipher::TLS_CHACHA20_POLY1305_SHA256(
-												ChaCha20Poly1305::new(shared.as_bytes())
-											)
-										},
-										CipherSuite::TLS_AES_128_CCM_SHA256 => {
-											Cipher::TLS_AES_128_CCM_SHA256(
-												todo!()
-											)
-										},
-										// CCM_8 is not supported
-										// TODO: Abort communication
-										CipherSuite::TLS_AES_128_CCM_8_SHA256 => {
-											todo!()
-										}
-									};
-									self.cipher.replace(Some(cipher));
+									// let cipher = match selected_cipher {
+									// 	CipherSuite::TLS_AES_128_GCM_SHA256 => {
+									// 		Cipher::TLS_AES_128_GCM_SHA256(
+									// 			todo!()
+									// 		)
+									// 	},
+									// 	CipherSuite::TLS_AES_256_GCM_SHA384 => {
+									// 		Cipher::TLS_AES_256_GCM_SHA384(
+									// 			Aes256Gcm::new(shared.as_bytes())
+									// 		)
+									// 	},
+									// 	CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
+									// 		Cipher::TLS_CHACHA20_POLY1305_SHA256(
+									// 			ChaCha20Poly1305::new(shared.as_bytes())
+									// 		)
+									// 	},
+									// 	CipherSuite::TLS_AES_128_CCM_SHA256 => {
+									// 		Cipher::TLS_AES_128_CCM_SHA256(
+									// 			todo!()
+									// 		)
+									// 	},
+									// 	// CCM_8 is not supported
+									// 	// TODO: Abort communication
+									// 	CipherSuite::TLS_AES_128_CCM_8_SHA256 => {
+									// 		todo!()
+									// 	}
+									// };
+									// self.cipher.replace(Some(cipher));
 								}
 							}
 						}
-						self.state.replace(TlsState::WAIT_EE);
 
 					} else {
 						// Handle invalid TLS packet
 						todo!()
 					}
 
+					// This is indeed a desirable ServerHello TLS repr
+					// Reprocess ServerHello into a slice
+					// Update SHA256 hasher with the slice
+					let mut array = [0; 2048];
+					let mut buffer = TlsBuffer::new(&mut array);
+					buffer.enqueue_tls_repr(repr);
+					let slice: &[u8] = buffer.into();
+					{
+						self.handshake_sha256
+							.borrow_mut()
+							.update(&slice[5..]);
+					}
+					
+					// Update TLS session state
+					self.state.replace(TlsState::WAIT_EE);
 				}
 			},
 
@@ -334,6 +367,23 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		buffer.enqueue_tls_repr(tls_repr)?;
 		let buffer_size = buffer.get_size();
 		tcp_socket.send_slice(buffer.into())
+			.and_then(
+				|size| if size == buffer_size {
+					Ok(())
+				} else {
+					Err(Error::Truncated)
+				}
+			)
+	}
+
+	// Generic inner send method for buffer IO, through TCP socket
+	fn send_tls_slice(&self, sockets: &mut SocketSet, slice: &[u8]) -> Result<()> {
+		let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+		if !tcp_socket.can_send() {
+			return Err(Error::Illegal);
+		}
+		let buffer_size = slice.len();
+		tcp_socket.send_slice(slice)
 			.and_then(
 				|size| if size == buffer_size {
 					Ok(())

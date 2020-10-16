@@ -8,8 +8,10 @@ use alloc::vec::Vec;
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
 
 use crate::tls_packet::*;
+use crate::key::*;
 
 // Only designed to support read or write the entire buffer
+// TODO: Stricter visibility
 pub(crate) struct TlsBuffer<'a> {
 	buffer: &'a mut [u8],
 	index: RefCell<usize>,
@@ -22,7 +24,7 @@ impl<'a> Into<&'a [u8]> for TlsBuffer<'a> {
 }
 
 impl<'a> TlsBuffer<'a> {
-	pub(crate) fn new(buffer: &'a mut [u8]) -> Self {
+	pub fn new(buffer: &'a mut [u8]) -> Self {
 		Self {
 			buffer,
 			index: RefCell::new(0),
@@ -198,6 +200,14 @@ impl<'a> TlsBuffer<'a> {
 		self.write_u16(entry.group.into())?;
 		self.write_u16(entry.length)?;
 		self.write(entry.key_exchange.as_slice())
+	}
+
+	pub fn enqueue_hkdf_label(&mut self, hkdf_label: HkdfLabel) -> Result<()> {
+		self.write_u16(hkdf_label.length)?;
+		self.write_u8(hkdf_label.label_length)?;
+		self.write(hkdf_label.label)?;
+		self.write_u8(hkdf_label.context_length)?;
+		self.write(hkdf_label.context)
 	}
 }
 

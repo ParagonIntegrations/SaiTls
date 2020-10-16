@@ -201,7 +201,7 @@ impl<'a> ClientHello<'a> {
 			random,
 			session_id_length: 32,
 			session_id,
-			cipher_suites_length: 6,
+			cipher_suites_length: 0,
 			cipher_suites: &[
 				CipherSuite::TLS_AES_128_GCM_SHA256,
 				CipherSuite::TLS_AES_256_GCM_SHA384,
@@ -213,6 +213,7 @@ impl<'a> ClientHello<'a> {
 			extension_length: 0,
 			extensions: Vec::new(),
 		};
+		client_hello.cipher_suites_length = u16::try_from(client_hello.cipher_suites.len() * 2).unwrap();
 
 		client_hello.add_ch_supported_versions()
 			.add_sig_algs()
