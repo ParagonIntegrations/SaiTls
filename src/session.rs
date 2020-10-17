@@ -133,6 +133,12 @@ impl Session {
 						ecdhe_shared_secret.as_bytes()
 					);
 
+				// Store the handshake secret
+				self.latest_secret.replace(
+					Vec::from_slice(&handshake_secret)
+						.unwrap()
+				);
+
 				let client_handshake_traffic_secret = derive_secret(
 					&handshake_secret_hkdf,
 					"c hs traffic",
@@ -304,6 +310,12 @@ impl Session {
 						Some(&derived_secret),
 						ecdhe_shared_secret.as_bytes()
 					);
+
+				// Store the handshake secret
+				self.latest_secret.replace(
+					Vec::from_slice(&handshake_secret)
+						.unwrap()
+				);
 
 				let client_handshake_traffic_secret = derive_secret(
 					&handshake_secret_hkdf,
