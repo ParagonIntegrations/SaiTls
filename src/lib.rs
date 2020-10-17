@@ -9,6 +9,7 @@ pub mod parse;
 pub mod cipher_suite;
 pub mod buffer;
 pub mod key;
+pub mod session;
 
 // TODO: Implement errors
 // Details: Encapsulate smoltcp & nom errors

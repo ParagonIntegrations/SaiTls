@@ -9,19 +9,19 @@ use crate::buffer::TlsBuffer;
 use core::convert::TryFrom;
 
 #[derive(Debug, Clone)]
-pub(crate) struct HkdfLabel<'a> {
+pub struct HkdfLabel<'a> {
 	// Length of hash function
-	pub(crate) length: u16,
+	pub length: u16,
 	// Label vector: "tls13 " + label
-    pub(crate) label_length: u8,
-	pub(crate) label: &'a [u8],
+    pub label_length: u8,
+	pub label: &'a [u8],
 	// Context vector: Hashed message
-    pub(crate) context_length: u8,
-    pub(crate) context: &'a [u8],
+    pub context_length: u8,
+    pub context: &'a [u8],
 }
 
 // Implementation of Derive-Secret function in RFC8446
-pub(crate) fn derive_secret<Hash>(
+pub fn derive_secret<Hash>(
     hkdf: &Hkdf<Hash>,
     label: &str,
     hash: Hash
@@ -66,7 +66,7 @@ where
 
 // Implementation of HKDF-Expand-Label function in RFC8446
 // Secret is embedded inside hkdf through salt and input key material (IKM)
-pub(crate) fn hkdf_expand_label<Hash>(
+pub fn hkdf_expand_label<Hash>(
     hkdf: &Hkdf<Hash>,
     label: &str,
     context: &str,
@@ -104,7 +104,7 @@ where
     //      context_vec: 48 bytes for SHA384 + 1 byte (len)
     let mut array = [0; 100];
     let mut buffer = TlsBuffer::new(&mut array);
-    buffer.enqueue_hkdf_label(hkdf_label);
+    buffer.enqueue_hkdf_label(hkdf_label).unwrap();
     let info: &[u8] = buffer.into();
 
     hkdf.expand(info, okm).unwrap();

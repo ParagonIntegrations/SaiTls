@@ -37,10 +37,11 @@ use crate::tls_packet::*;
 use crate::parse::parse_tls_repr;
 use crate::cipher_suite::CipherSuite;
 use crate::buffer::TlsBuffer;
+use crate::session::{Session, TlsRole};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
-enum TlsState {
+pub(crate) enum TlsState {
 	START,
 	WAIT_SH,
 	WAIT_EE,
@@ -62,6 +63,7 @@ pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 	received_change_cipher_spec: RefCell<Option<bool>>,
 	cipher: RefCell<Option<CipherSuite>>,
 	handshake_sha256: RefCell<Sha256>,
+	session: RefCell<Session>,
 }
 
 impl<R: RngCore + CryptoRng> TlsSocket<R> {
@@ -85,6 +87,9 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			received_change_cipher_spec: RefCell::new(None),
 			cipher: RefCell::new(None),
 			handshake_sha256: RefCell::new(Sha256::new()),
+			session: RefCell::new(
+				Session::new(TlsRole::Client)
+			),
 		}
 	}
 

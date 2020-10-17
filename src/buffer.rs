@@ -12,7 +12,7 @@ use crate::key::*;
 
 // Only designed to support read or write the entire buffer
 // TODO: Stricter visibility
-pub(crate) struct TlsBuffer<'a> {
+pub struct TlsBuffer<'a> {
 	buffer: &'a mut [u8],
 	index: RefCell<usize>,
 }
