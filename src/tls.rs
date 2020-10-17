@@ -35,7 +35,6 @@ use alloc::vec::{ self, Vec };
 use crate::Error as TlsError;
 use crate::tls_packet::*;
 use crate::parse::parse_tls_repr;
-use crate::cipher_suite::CipherSuite;
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
 
@@ -55,14 +54,8 @@ pub(crate) enum TlsState {
 // TODO: Group up all session_specific parameters into a separate structure
 pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
 {
-	state: RefCell<TlsState>,
 	tcp_handle: SocketHandle,
 	rng: R,
-	secret: RefCell<Option<EphemeralSecret>>,	// Used enum Option to allow later init
-	session_id: RefCell<Option<[u8; 32]>>,		// init session specific field later
-	received_change_cipher_spec: RefCell<Option<bool>>,
-	cipher: RefCell<Option<CipherSuite>>,
-	handshake_sha256: RefCell<Sha256>,
 	session: RefCell<Session>,
 }
 
@@ -79,14 +72,8 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		let tcp_socket = TcpSocket::new(rx_buffer, tx_buffer);
 		let tcp_handle = sockets.add(tcp_socket);
 		TlsSocket {
-			state: RefCell::new(TlsState::START),
 			tcp_handle,
 			rng,
-			secret: RefCell::new(None),
-			session_id: RefCell::new(None),
-			received_change_cipher_spec: RefCell::new(None),
-			cipher: RefCell::new(None),
-			handshake_sha256: RefCell::new(Sha256::new()),
 			session: RefCell::new(
 				Session::new(TlsRole::Client)
 			),
@@ -130,8 +117,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		}
 
 		// Handle TLS handshake through TLS states
-		let state = self.state.clone().into_inner();
-		match state {
+		match self.session.borrow().get_tls_state() {
 			// Initiate TLS handshake
 			TlsState::START => {
 				// Prepare field that is randomised,
@@ -142,7 +128,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				self.rng.fill_bytes(&mut random);
 				self.rng.fill_bytes(&mut session_id);
 				let repr = TlsRepr::new()
-					.client_hello(&ecdh_secret, random, session_id);
+					.client_hello(&ecdh_secret, random, session_id.clone());
 
 				// Update hash function with client hello handshake
 				let mut array = [0; 2048];
@@ -150,29 +136,27 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				buffer.enqueue_tls_repr(repr)?;
 				let slice: &[u8] = buffer.into();
 
-				// Update hash by handshake
-				// Update with entire packet except the record layer
-				{
-					self.handshake_sha256.borrow_mut().update(&slice[5..]);
-				}
+				// Send the packet
 				self.send_tls_slice(sockets, slice)?;
 
-				// Store session settings, i.e. secret, session_id
-				self.secret.replace(Some(ecdh_secret));
-				self.session_id.replace(Some(session_id));
-				self.received_change_cipher_spec.replace(Some(false));
-
-				// Update the TLS state
-				self.state.replace(TlsState::WAIT_SH);
+				// Update TLS session
+				self.session.borrow_mut().client_update_for_ch(
+					ecdh_secret,
+					session_id,
+					&slice[5..]
+				);
 			},
+
 			// TLS Client wait for Server Hello
 			// No need to send anything
 			TlsState::WAIT_SH => {},
+
 			// TLS Client wait for certificate from TLS server
 			// No need to send anything
-			// Note: TLS server should normall send SH alongside EE
+			// Note: TLS server should normally send SH alongside EE
 			// TLS client should jump from WAIT_SH directly to WAIT_CERT_CR directly.
 			TlsState::WAIT_EE => {},
+
 			_ => todo!()
 		}
 
@@ -191,13 +175,11 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			self.process(repr)?;
 		}
 
-		Ok(self.state.clone().into_inner() == TlsState::CONNECTED)
+		Ok(self.session.borrow().has_completed_handshake())
 	}
 
 	// Process TLS ingress during handshake
 	fn process(&self, repr: TlsRepr) -> Result<()> {
-		let state = self.state.clone().into_inner();
-
 		// Change_cipher_spec check:
 		// Must receive CCS before recv peer's FINISH message
 		// i.e. Must happen after START and before CONNECTED
@@ -205,11 +187,11 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		// CCS message only exist for compatibility reason,
 		// Drop the message and update `received_change_cipher_spec`
 		if repr.is_change_cipher_spec() {
-			self.received_change_cipher_spec.replace(Some(true));
+			self.session.borrow_mut().receive_change_cipher_spec();
 			return Ok(())
 		}
 
-		match state {
+		match self.session.borrow().get_tls_state() {
 			// During WAIT_SH for a TLS client, client should wait for ServerHello
 			TlsState::WAIT_SH => {
 				// Legacy_protocol must be TLS 1.2
@@ -232,25 +214,37 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 					// supported_version: Must be TLS 1.3
 					// key_share: Store key, must be in secp256r1
 					//		(TODO: Support other key shares ^)
+
+					// "Cache" for ECDHE server public info
+					let mut server_public: Option<EncodedPoint> = None;
+					let mut selected_cipher: Option<CipherSuite> = None;
+
+					// Process the handshake data within ServerHello
 					let handshake_data = &repr.handshake.as_ref().unwrap().handshake_data;
 					if let HandshakeData::ServerHello(server_hello) = handshake_data {
+
 						// Check random: Cannot be SHA-256 of "HelloRetryRequest"
 						if server_hello.random == HRR_RANDOM {
 							// Abort communication
 							todo!()
 						}
+
 						// Check session_id_echo
 						// The socket should have a session_id after moving from START state
-						if self.session_id.clone().into_inner().unwrap() != server_hello.session_id_echo {
+						if !self.session.borrow().verify_session_id_echo(server_hello.session_id_echo) {
 							// Abort communication
 							todo!()
 						}
-						// Store the cipher suite
-						let selected_cipher = server_hello.cipher_suite;
+
+						// Note the selected cipher suite
+						selected_cipher.replace(server_hello.cipher_suite);
+
+						// TLSv13 forbidden key compression
 						if server_hello.compression_method != 0 {
 							// Abort communciation
 							todo!()
 						}
+
 						for extension in server_hello.extensions.iter() {
 							if extension.extension_type == ExtensionType::SupportedVersions {
 								if let ExtensionData::SupportedVersions(
@@ -285,43 +279,11 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 									// It is surely from secp256r1, no other groups are permitted
 									// Convert untagged bytes into encoded point on p256 eliptic curve
 									// Slice the first byte out of the bytes
-									let server_public = EncodedPoint::from_untagged_bytes(
-										GenericArray::from_slice(&server_share.key_exchange[1..])
+									server_public.replace(
+										EncodedPoint::from_untagged_bytes(
+											GenericArray::from_slice(&server_share.key_exchange[1..])
+										)
 									);
-									// TODO: Handle improper shared key
-									// Right now is causes a panic, only socket abort is needed
-									let secret = self.secret.replace(None);
-									let shared = secret.unwrap()
-										.diffie_hellman(&server_public)
-										.expect("Unsupported key");
-									// let cipher = match selected_cipher {
-									// 	CipherSuite::TLS_AES_128_GCM_SHA256 => {
-									// 		Cipher::TLS_AES_128_GCM_SHA256(
-									// 			todo!()
-									// 		)
-									// 	},
-									// 	CipherSuite::TLS_AES_256_GCM_SHA384 => {
-									// 		Cipher::TLS_AES_256_GCM_SHA384(
-									// 			Aes256Gcm::new(shared.as_bytes())
-									// 		)
-									// 	},
-									// 	CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
-									// 		Cipher::TLS_CHACHA20_POLY1305_SHA256(
-									// 			ChaCha20Poly1305::new(shared.as_bytes())
-									// 		)
-									// 	},
-									// 	CipherSuite::TLS_AES_128_CCM_SHA256 => {
-									// 		Cipher::TLS_AES_128_CCM_SHA256(
-									// 			todo!()
-									// 		)
-									// 	},
-									// 	// CCM_8 is not supported
-									// 	// TODO: Abort communication
-									// 	CipherSuite::TLS_AES_128_CCM_8_SHA256 => {
-									// 		todo!()
-									// 	}
-									// };
-									// self.cipher.replace(Some(cipher));
 								}
 							}
 						}
@@ -331,21 +293,24 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 						todo!()
 					}
 
+					// Check that both selected_cipher and server_public were received
+					if selected_cipher.is_none() || server_public.is_none() {
+						// Abort communication
+						todo!()
+					}
+
 					// This is indeed a desirable ServerHello TLS repr
 					// Reprocess ServerHello into a slice
-					// Update SHA256 hasher with the slice
+					// Update session with required parameter
 					let mut array = [0; 2048];
 					let mut buffer = TlsBuffer::new(&mut array);
 					buffer.enqueue_tls_repr(repr);
 					let slice: &[u8] = buffer.into();
-					{
-						self.handshake_sha256
-							.borrow_mut()
-							.update(&slice[5..]);
-					}
-					
-					// Update TLS session state
-					self.state.replace(TlsState::WAIT_EE);
+					self.session.borrow_mut().client_update_for_sh(
+						selected_cipher.unwrap(),
+						server_public.unwrap(),
+						&slice[5..]
+					);
 				}
 			},
 

@@ -6,7 +6,6 @@ extern crate alloc;
 pub mod tls;
 pub mod tls_packet;
 pub mod parse;
-pub mod cipher_suite;
 pub mod buffer;
 pub mod key;
 pub mod session;

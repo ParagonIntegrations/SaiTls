@@ -411,6 +411,14 @@ impl Session {
 	pub(crate) fn get_tls_state(&self) -> TlsState {
 		self.state
 	}
+
+	pub(crate) fn has_completed_handshake(&self) -> bool {
+		self.state == TlsState::CONNECTED
+	}
+
+	pub(crate) fn receive_change_cipher_spec(&mut self) {
+		self.changed_cipher_spec = true;
+	}
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
