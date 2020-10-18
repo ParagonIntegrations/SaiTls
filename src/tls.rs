@@ -34,7 +34,7 @@ use alloc::vec::{ self, Vec };
 
 use crate::Error as TlsError;
 use crate::tls_packet::*;
-use crate::parse::parse_tls_repr;
+use crate::parse::{ parse_tls_repr, parse_encrypted_extensions };
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
 
@@ -179,7 +179,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 	}
 
 	// Process TLS ingress during handshake
-	fn process(&self, repr: TlsRepr) -> Result<()> {
+	fn process(&self, mut repr: TlsRepr) -> Result<()> {
 		// Change_cipher_spec check:
 		// Must receive CCS before recv peer's FINISH message
 		// i.e. Must happen after START and before CONNECTED
@@ -316,8 +316,42 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
 			// Expect encrypted extensions after receiving SH
 			TlsState::WAIT_EE => {
+				// Check that the packet is classified as application data
+				if !repr.is_application_data() {
+					// Abort communication, this affect IV calculation
+					todo!()
+				}
+
 				// ExcepytedExtensions are disguised as ApplicationData
 				// Pull out the `payload` from TlsRepr, decrypt as EE
+				let mut payload = repr.payload.take().unwrap();
+				let mut array: [u8; 5] = [0; 5];
+				let mut buffer = TlsBuffer::new(&mut array);
+				buffer.write_u8(repr.content_type.into())?;
+				buffer.write_u16(repr.version.into())?;
+				buffer.write_u16(repr.length)?;
+				let associated_data: &[u8] = buffer.into();
+				self.session.borrow().encrypt_in_place(
+					associated_data,
+					&mut payload
+				);
+
+				// TODO: Parse payload of EE
+				let (_, encrypted_extensions) =
+					parse_encrypted_extensions(&payload)
+						.map_err(|_| Error::Unrecognized)?;
+
+				// TODO: Process payload
+				// Practically, nothing will be done about cookies/server name
+				// Extension processing is therefore skipped
+
+				self.session.borrow_mut().client_update_for_ee();
+			},
+
+			// In this stage, wait for a certificate from server
+			// Parse the certificate and check its content
+			TlsState::WAIT_CERT_CR => {
+
 			},
 
 			_ => {},
@@ -370,10 +404,8 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		if !tcp_socket.can_recv() {
 			return Ok((Vec::new()));
 		}
-
 		let array_size = tcp_socket.recv_slice(byte_array)?;
 		let mut vec: Vec<TlsRepr> = Vec::new();
-
 		let mut bytes: &[u8] = &byte_array[..array_size];
 		loop {
 			match parse_tls_repr(bytes) {

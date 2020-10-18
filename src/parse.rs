@@ -43,7 +43,9 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
                 repr.handshake = Some(handshake);
             },
             ChangeCipherSpec | ApplicationData => {
-                repr.payload = Some(bytes);
+	            let mut vec: Vec<u8> = Vec::new();
+	            vec.extend_from_slice(bytes);
+                repr.payload = Some(vec);
             },
             _ => todo!()
         }
@@ -124,6 +126,30 @@ fn parse_server_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
     Ok((rest, HandshakeData::ServerHello(server_hello)))
 }
 
+pub(crate) fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtensions> {
+	let (mut rest, extension_length) = take(2_usize)(bytes)?;
+	let mut extension_length: i32 = NetworkEndian::read_u16(extension_length).into();
+	let mut extension_vec: Vec<Extension> = Vec::new();
+	while extension_length > 0 {
+		let (rem, extension) = parse_extension(rest, HandshakeType::EncryptedExtensions)?;
+		rest = rem;
+		extension_length -= i32::try_from(extension.get_length()).unwrap();
+
+		// Todo:: Proper error
+		if extension_length < 0 {
+			todo!()
+		}
+
+		extension_vec.push(extension);
+	}
+
+	let encrypted_extensions = EncryptedExtensions {
+		length: u16::try_from(extension_length).unwrap(),
+		extensions: extension_vec
+	};
+	Ok((rest, encrypted_extensions))
+}
+
 fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8], Extension> {
     let extension_type = take(2_usize);
     let length = take(2_usize);
@@ -139,6 +165,7 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
     // Process extension data according to extension_type
     // TODO: Deal with HelloRetryRequest
     let (rest, extension_data) = {
+	    // TODO: Handle all mandatory extension types
         use ExtensionType::*;
         match extension_type {
             SupportedVersions => {

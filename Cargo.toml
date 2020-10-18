@@ -5,8 +5,6 @@ authors = ["occheung"]
 edition = "2018"
 
 [dependencies]
-aes-gcm = "0.7.0"
-ccm = "0.2.0"
 hkdf = "0.9.0"
 sha2 = {  version = "0.9.1", default-features = false }
 byteorder = { version = "1.3.4", default-features = false }
@@ -14,6 +12,16 @@ num_enum = { version = "0.5.1", default-features = false }
 log = "0.4.11"
 generic-array = "0.14.4"
 heapless = "0.5.6"
+
+[dependencies.aes-gcm]
+version = "0.8.0"
+default-features = true
+features = [ "heapless" ]
+
+[dependencies.ccm]
+version = "0.3.0"
+default-features = true
+features = [ "heapless" ]
 
 [dependencies.smoltcp]
 version = "0.6.0"
@@ -28,7 +36,7 @@ features = []
 [dependencies.chacha20poly1305]
 version = "0.6.0"
 default-features = false
-features = [ "alloc", "chacha20" ]
+features = [ "alloc", "chacha20", "heapless" ]
 
 [dependencies.p256]
 version = "0.5.0"

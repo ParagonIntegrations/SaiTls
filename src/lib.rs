@@ -16,5 +16,6 @@ pub enum Error {
     PropagatedError(smoltcp::Error),
     ParsingError,
     EncryptionError,
+    DecryptionError,
     CapacityError,
 }

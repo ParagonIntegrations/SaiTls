@@ -86,7 +86,7 @@ impl<'a> TlsBuffer<'a> {
 		self.write_u16(tls_repr.version.into())?;
 		self.write_u16(tls_repr.length)?;
 		if let Some(app_data) = tls_repr.payload {
-			self.write(app_data)?;
+			self.write(app_data.as_slice())?;
 		} else if let Some(handshake_repr) = tls_repr.handshake {
 			// Queue handshake_repr into buffer
 			self.enqueue_handshake_repr(handshake_repr)?;

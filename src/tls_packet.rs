@@ -46,7 +46,7 @@ pub(crate) struct TlsRepr<'a> {
 	pub(crate) content_type: TlsContentType,
 	pub(crate) version: TlsVersion,
 	pub(crate) length: u16,
-	pub(crate) payload: Option<&'a[u8]>,
+	pub(crate) payload: Option<Vec<u8>>,
 	pub(crate) handshake: Option<HandshakeRepr<'a>>
 }
 
@@ -96,12 +96,19 @@ impl<'a> TlsRepr<'a> {
 		self.handshake.is_none() &&
 		self.payload.is_some() &&
 		{
-			if let Some(data) = self.payload {
-				[0x01] == data
+			if let Some(data) = &self.payload {
+				data[0] == 0x01 &&
+				data.len() == 1
 			} else {
 				false
 			}
 		}
+	}
+
+	pub(crate) fn is_application_data(&self) -> bool {
+		self.content_type == TlsContentType::ApplicationData &&
+		self.handshake.is_none() &&
+		self.payload.is_some()
 	}
 
 	pub(crate) fn decrypt_ee(&self, shared_secret: &SharedSecret) -> HandshakeRepr {
@@ -405,8 +412,8 @@ pub(crate) struct ServerHello<'a> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct EncryptedExtensions {
-	length: u16,
-	extensions: Vec<Extension>,
+	pub(crate) length: u16,
+	pub(crate) extensions: Vec<Extension>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]

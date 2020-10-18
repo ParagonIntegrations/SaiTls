@@ -27,6 +27,7 @@ pub(crate) struct Session {
 	changed_cipher_spec: bool,
 	// Handshake secret, Master secret
 	// Early secret is computed right before HS
+	// TLS standard: Secrets should not be stored unnecessarily
 	latest_secret: Option<Vec<u8, U64>>,
 	// Hash functions needed
 	hash: Hash,
@@ -412,6 +413,10 @@ impl Session {
 		self.state = TlsState::WAIT_EE;
 	}
 
+	pub(crate) fn client_update_for_ee(&mut self) {
+		self.state = TlsState::WAIT_CERT_CR;
+	}
+
 	pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
 		if let Some(session_id_inner) = self.session_id {
 			session_id_inner == session_id_echo
@@ -430,6 +435,50 @@ impl Session {
 
 	pub(crate) fn receive_change_cipher_spec(&mut self) {
 		self.changed_cipher_spec = true;
+	}
+
+	pub(crate) fn encrypt_in_place(
+		&self,
+		associated_data: &[u8],
+		buffer: &mut dyn Buffer
+	) -> Result<(), Error> {
+		let (nonce, cipher): (&Vec<u8, U12>, &Cipher) = match self.role {
+			TlsRole::Client => {(
+				self.client_nonce.as_ref().unwrap(),
+				self.client_cipher.as_ref().unwrap()
+			)},
+			TlsRole::Server => {(
+				self.server_nonce.as_ref().unwrap(),
+				self.server_cipher.as_ref().unwrap()
+			)},
+		};
+		cipher.encrypt_in_place(
+			&GenericArray::from_slice(nonce),
+			associated_data,
+			buffer
+		)
+	}
+
+	pub(crate) fn decrypt_in_place(
+		&self,
+		associated_data: &[u8],
+		buffer: &mut dyn Buffer
+	) -> Result<(), Error> {
+		let (nonce, cipher): (&Vec<u8, U12>, &Cipher) = match self.role {
+			TlsRole::Client => {(
+				self.client_nonce.as_ref().unwrap(),
+				self.client_cipher.as_ref().unwrap()
+			)},
+			TlsRole::Server => {(
+				self.server_nonce.as_ref().unwrap(),
+				self.server_cipher.as_ref().unwrap()
+			)},
+		};
+		cipher.decrypt_in_place(
+			&GenericArray::from_slice(nonce),
+			associated_data,
+			buffer
+		)
 	}
 }
 
@@ -525,7 +574,7 @@ pub(crate) enum Cipher {
 
 impl Cipher {
 	pub(crate) fn encrypt_in_place(
-		&mut self,
+		&self,
 		nonce: &GenericArray<u8, U12>,
 		associated_data: &[u8],
 		buffer: &mut dyn Buffer
@@ -544,5 +593,27 @@ impl Cipher {
 				ccm.encrypt_in_place(nonce, associated_data, buffer)
 			}
 		}.map_err(|_| Error::EncryptionError)
+	}
+
+	pub(crate) fn decrypt_in_place(
+		&self,
+		nonce: &GenericArray<u8, U12>,
+		associated_data: &[u8],
+		buffer: &mut dyn Buffer
+	) -> Result<(), Error> {
+		match self {
+			Cipher::Aes128Gcm { aes128gcm } => {
+				aes128gcm.decrypt_in_place(nonce, associated_data, buffer)
+			},
+			Cipher::Aes256Gcm { aes256gcm } => {
+				aes256gcm.decrypt_in_place(nonce, associated_data, buffer)
+			},
+			Cipher::Chacha20poly1305 { chacha20poly1305 } => {
+				chacha20poly1305.decrypt_in_place(nonce, associated_data, buffer)
+			},
+			Cipher::Ccm { ccm } => {
+				ccm.decrypt_in_place(nonce, associated_data, buffer)
+			}
+		}.map_err(|_| Error::DecryptionError)
 	}
 }

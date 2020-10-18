@@ -22,6 +22,9 @@ use hkdf::Hkdf;
 use smoltcp_tls::key::*;
 use smoltcp_tls::buffer::TlsBuffer;
 
+mod encrypted;
+use encrypted::ENCRYPTED_DATA;
+
 struct CountingRng(u64);
 
 impl RngCore for CountingRng {
@@ -120,7 +123,7 @@ fn main() {
 		handshake_secret_hkdf.expand(info, &mut okm).unwrap();
 		okm
 	};
-	let client_handshake_write_key = {
+	let server_handshake_write_key = {
 		let hkdf_label = HkdfLabel {
 			length: 16,
 			label_length: 9,
@@ -135,15 +138,49 @@ fn main() {
 
 		// Define output key material (OKM), dynamically sized by hash
 		let mut okm: GenericArray<u8, U16> = GenericArray::default();
-		Hkdf::<Sha256>::from_prk(&client_handshake_traffic_secret)
+		Hkdf::<Sha256>::from_prk(&server_handshake_traffic_secret)
 			.unwrap()
 			.expand(info, &mut okm);
 		okm
 	};
+	let server_handshake_write_iv = {
+		let hkdf_label = HkdfLabel {
+			length: 12,
+			label_length: 8,
+			label: b"tls13 iv",
+			context_length: 0,
+			context: b"",
+		};
+		let mut array = [0; 100];
+		let mut buffer = TlsBuffer::new(&mut array);
+		buffer.enqueue_hkdf_label(hkdf_label);
+		let info: &[u8] = buffer.into();
+
+		// Define output key material (OKM), dynamically sized by hash
+		let mut okm: GenericArray<u8, U12> = GenericArray::default();
+		Hkdf::<Sha256>::from_prk(&server_handshake_traffic_secret)
+			.unwrap()
+			.expand(info, &mut okm);
+		okm
+	};
+	let cipher: Aes128Gcm = Aes128Gcm::new(&server_handshake_write_key);
+	let decrypted_data = {
+		let mut vec: Vec<u8, U2048> = Vec::from_slice(&ENCRYPTED_DATA).unwrap();
+		cipher.decrypt_in_place(
+			&server_handshake_write_iv,
+			&[
+				0x17, 0x03, 0x03, 0x04, 0x75
+			],
+			&mut vec
+		).unwrap();
+		vec
+	};
 
 	println!("{:x?}", client_handshake_traffic_secret);
 	println!("{:x?}", server_handshake_traffic_secret);
-	println!("{:x?}", client_handshake_write_key);
+	println!("{:x?}", server_handshake_write_key);
+	println!("{:x?}", server_handshake_write_iv);
+	println!("{:x?}", decrypted_data);
 
 }
 
