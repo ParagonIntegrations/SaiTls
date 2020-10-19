@@ -188,7 +188,7 @@ pub(crate) enum HandshakeData<'a> {
 	Uninitialized,
 	ClientHello(ClientHello<'a>),
 	ServerHello(ServerHello<'a>),
-	ExcryptedExtensions(EncryptedExtensions),
+	EncryptedExtensions(EncryptedExtensions),
 }
 
 impl<'a> HandshakeData<'a> {
@@ -558,6 +558,9 @@ impl SignatureSchemeList {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 pub(crate) enum NamedGroup {
+	#[num_enum(default)]
+	UNKNOWN = 0x0000,
+
 	/* Elliptic Curve Groups (ECDHE) */
 	secp256r1 = 0x0017,
 	secp384r1 = 0x0018,

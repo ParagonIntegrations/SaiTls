@@ -107,6 +107,9 @@ impl<'a> TlsBuffer<'a> {
 			HandshakeData::ClientHello(client_hello) => {
 				self.enqueue_client_hello(client_hello)
 			}
+			HandshakeData::ServerHello(server_hello) => {
+				self.euqueue_server_hello(server_hello)
+			}
 			_ => {
 				Err(Error::Unrecognized)
 			}
@@ -126,6 +129,17 @@ impl<'a> TlsBuffer<'a> {
 		self.write_u8(client_hello.compression_methods)?;
 		self.write_u16(client_hello.extension_length)?;
 		self.enqueue_extensions(client_hello.extensions)
+	}
+
+	fn euqueue_server_hello(&mut self, server_hello: ServerHello<'a>) -> Result<()> {
+		self.write_u16(server_hello.version.into())?;
+		self.write(&server_hello.random)?;
+		self.write_u8(server_hello.session_id_echo_length)?;
+		self.write(&server_hello.session_id_echo)?;
+		self.write_u16(server_hello.cipher_suite.into())?;
+		self.write_u8(server_hello.compression_method)?;
+		self.write_u16(server_hello.extension_length)?;
+		self.enqueue_extensions(server_hello.extensions)
 	}
 
 	fn enqueue_extensions(&mut self, extensions: Vec<Extension>) -> Result<()> {

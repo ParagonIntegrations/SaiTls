@@ -1,5 +1,6 @@
 use nom::IResult;
 use nom::bytes::complete::take;
+use nom::bytes::complete::tag;
 use nom::combinator::complete;
 use nom::sequence::tuple;
 use nom::error::ErrorKind;
@@ -53,7 +54,7 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
     Ok((rest, repr))
 }
 
-fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
+pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
     let handshake_type = take(1_usize);
     let length = take(3_usize);
     
@@ -73,6 +74,30 @@ fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
                 repr.handshake_data = data;
                 Ok((rest, repr))
             },
+            EncryptedExtensions => {
+                // Split data into EE and the last TLS content byte
+                let (tls_content_byte, ee_data) = take(repr.length)(rest)?;
+
+                // Process TLS content byte.
+                complete(
+                    tag(&[0x16])
+                )(tls_content_byte)?;
+
+                // Process EE
+                let (rest, handshake_data) = parse_encrypted_extensions(
+                    ee_data
+                )?;
+                repr.handshake_data = HandshakeData::EncryptedExtensions(
+                    handshake_data
+                );
+
+                // Verify that all bytes are comsumed
+                complete(
+                    take(0_usize)
+                )(rest)?;
+
+                Ok((&[], repr))
+            }
             _ => todo!()
         }
     }
@@ -126,27 +151,42 @@ fn parse_server_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
     Ok((rest, HandshakeData::ServerHello(server_hello)))
 }
 
-pub(crate) fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtensions> {
-	let (mut rest, extension_length) = take(2_usize)(bytes)?;
-	let mut extension_length: i32 = NetworkEndian::read_u16(extension_length).into();
-	let mut extension_vec: Vec<Extension> = Vec::new();
-	while extension_length > 0 {
-		let (rem, extension) = parse_extension(rest, HandshakeType::EncryptedExtensions)?;
-		rest = rem;
-		extension_length -= i32::try_from(extension.get_length()).unwrap();
+fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtensions> {
+    let (mut rest, extension_length) = take(2_usize)(bytes)?;
+    let extension_length: u16 = NetworkEndian::read_u16(extension_length);
+	let mut extension_length_counter: i32 = extension_length.into();
+    let mut extension_vec: Vec<Extension> = Vec::new();
+    
+    // Split the data into "extensions" and the rest
+    let (rest, mut encypted_extension_data) =
+        take(usize::try_from(extension_length).unwrap())(rest)?;
+    
+	while extension_length_counter > 0 {
+		let (rem, extension) = parse_extension(
+            encypted_extension_data,
+            HandshakeType::EncryptedExtensions
+        )?;
+		encypted_extension_data = rem;
+		extension_length_counter -= i32::try_from(extension.get_length()).unwrap();
 
 		// Todo:: Proper error
-		if extension_length < 0 {
+		if extension_length_counter < 0 {
 			todo!()
 		}
 
 		extension_vec.push(extension);
-	}
+    }
 
 	let encrypted_extensions = EncryptedExtensions {
-		length: u16::try_from(extension_length).unwrap(),
+		length: extension_length,
 		extensions: extension_vec
-	};
+    };
+    
+    // Force completeness. The entire slice is meant to be processed.
+    complete(
+        take(0_usize)
+    )(rest)?;
+
 	Ok((rest, encrypted_extensions))
 }
 
@@ -190,6 +230,38 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
                     _ => todo!()
                 }
             },
+            SupportedGroups => {        // NamedGroupList
+                let (rest, length) = take(2_usize)(rest)?;
+                let length = NetworkEndian::read_u16(length);
+
+                // Isolate contents, for easier error handling
+                let (rest, mut rem_data) = take(length)(rest)?;
+
+                let mut named_group_extension = NamedGroupList {
+                    length,
+                    named_group_list: Vec::new(),
+                };
+
+                for index in 0..(length/2) {
+                    let (rem, named_group) = take(2_usize)(rem_data)?;
+                    rem_data = rem;
+                    let named_group = NamedGroup::try_from(
+                        NetworkEndian::read_u16(named_group)
+                    ).unwrap();
+                    named_group_extension.named_group_list.push(named_group);
+
+                    // Assure completeness
+                    if index == (length/2) {
+                        complete(take(0_usize))(rem_data)?;
+                    }
+                }
+                (
+                    rest,
+                    ExtensionData::NegotiatedGroups(
+                        named_group_extension
+                    )
+                )
+            }
             KeyShare => {
                 match handshake_type {
                     HandshakeType::ClientHello => {

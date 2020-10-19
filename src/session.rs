@@ -106,6 +106,8 @@ impl Session {
 				.diffie_hellman(&encoded_point)
 				.unwrap();
 
+		log::info!("Shared secret: {:?}", ecdhe_shared_secret.as_bytes());
+
 		// Generate Handshake secret
 		match cipher_suite {
 			CipherSuite::TLS_AES_128_GCM_SHA256 |
@@ -287,7 +289,7 @@ impl Session {
 					},
 					_ => unreachable!()
 				}
-			}
+			},
 			CipherSuite::TLS_AES_256_GCM_SHA384 => {
 				// Select 1 hash function, then update the hash
 				self.hash = Hash::select_sha384(self.hash.clone());
@@ -376,7 +378,7 @@ impl Session {
 				let server_handshake_iv: Vec<u8, U12> = {
 					let mut server_handshake_iv_holder = Vec::from_slice(&[0; 12]).unwrap();
 					hkdf_expand_label(
-						&client_handshake_traffic_secret_hkdf,
+						&server_handshake_traffic_secret_hkdf,
 						"iv",
 						"",
 						&mut server_handshake_iv_holder
@@ -405,11 +407,11 @@ impl Session {
 					}
 				);
 
-			}
+			},
 			CipherSuite::TLS_AES_128_CCM_8_SHA256 => {
 				unreachable!()
 			}
-		}
+		};
 		self.state = TlsState::WAIT_EE;
 	}
 
@@ -465,11 +467,11 @@ impl Session {
 		buffer: &mut dyn Buffer
 	) -> Result<(), Error> {
 		let (nonce, cipher): (&Vec<u8, U12>, &Cipher) = match self.role {
-			TlsRole::Client => {(
+			TlsRole::Server => {(
 				self.client_nonce.as_ref().unwrap(),
 				self.client_cipher.as_ref().unwrap()
 			)},
-			TlsRole::Server => {(
+			TlsRole::Client => {(
 				self.server_nonce.as_ref().unwrap(),
 				self.server_cipher.as_ref().unwrap()
 			)},

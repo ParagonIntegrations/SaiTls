@@ -34,7 +34,7 @@ use alloc::vec::{ self, Vec };
 
 use crate::Error as TlsError;
 use crate::tls_packet::*;
-use crate::parse::{ parse_tls_repr, parse_encrypted_extensions };
+use crate::parse::{ parse_tls_repr, parse_handshake };
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
 
@@ -117,7 +117,10 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		}
 
 		// Handle TLS handshake through TLS states
-		match self.session.borrow().get_tls_state() {
+		let tls_state = {
+			self.session.borrow().get_tls_state()
+		};
+		match tls_state {
 			// Initiate TLS handshake
 			TlsState::START => {
 				// Prepare field that is randomised,
@@ -131,7 +134,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 					.client_hello(&ecdh_secret, random, session_id.clone());
 
 				// Update hash function with client hello handshake
-				let mut array = [0; 2048];
+				let mut array = [0; 512];
 				let mut buffer = TlsBuffer::new(&mut array);
 				buffer.enqueue_tls_repr(repr)?;
 				let slice: &[u8] = buffer.into();
@@ -156,6 +159,10 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			// Note: TLS server should normally send SH alongside EE
 			// TLS client should jump from WAIT_SH directly to WAIT_CERT_CR directly.
 			TlsState::WAIT_EE => {},
+
+			// TLS Client wait for server's certificate
+			// No need to send anything
+			TlsState::WAIT_CERT_CR => {},
 
 			_ => todo!()
 		}
@@ -191,7 +198,10 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 			return Ok(())
 		}
 
-		match self.session.borrow().get_tls_state() {
+		let tls_state = {
+			self.session.borrow().get_tls_state()
+		};
+		match tls_state {
 			// During WAIT_SH for a TLS client, client should wait for ServerHello
 			TlsState::WAIT_SH => {
 				// Legacy_protocol must be TLS 1.2
@@ -302,11 +312,12 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 					// This is indeed a desirable ServerHello TLS repr
 					// Reprocess ServerHello into a slice
 					// Update session with required parameter
-					let mut array = [0; 2048];
+					let mut array = [0; 512];
 					let mut buffer = TlsBuffer::new(&mut array);
-					buffer.enqueue_tls_repr(repr);
+					buffer.enqueue_tls_repr(repr)?;
 					let slice: &[u8] = buffer.into();
-					self.session.borrow_mut().client_update_for_sh(
+					let mut session = self.session.borrow_mut();
+					session.client_update_for_sh(
 						selected_cipher.unwrap(),
 						server_public.unwrap(),
 						&slice[5..]
@@ -331,21 +342,26 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				buffer.write_u16(repr.version.into())?;
 				buffer.write_u16(repr.length)?;
 				let associated_data: &[u8] = buffer.into();
-				self.session.borrow().encrypt_in_place(
-					associated_data,
-					&mut payload
-				);
+				{
+					self.session.borrow().decrypt_in_place(
+						associated_data,
+						&mut payload
+					);
+				}
+				log::info!("Decrypted payload {:?}", payload);
 
 				// TODO: Parse payload of EE
-				let (_, encrypted_extensions) =
-					parse_encrypted_extensions(&payload)
-						.map_err(|_| Error::Unrecognized)?;
+				let parse_result = parse_handshake(&payload);
+				let (_, encrypted_extensions_handshake) = parse_result
+					.map_err(|_| Error::Unrecognized)?;
 
 				// TODO: Process payload
 				// Practically, nothing will be done about cookies/server name
 				// Extension processing is therefore skipped
+				log::info!("EE handshake: {:?}", encrypted_extensions_handshake);
 
 				self.session.borrow_mut().client_update_for_ee();
+				log::info!("Transition to WAIT_CERT_CR");
 			},
 
 			// In this stage, wait for a certificate from server
