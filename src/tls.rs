@@ -193,8 +193,10 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		//
 		// CCS message only exist for compatibility reason,
 		// Drop the message and update `received_change_cipher_spec`
+		// Note: CSS doesn't count as a proper record, no need to increment sequence number
 		if repr.is_change_cipher_spec() {
-			self.session.borrow_mut().receive_change_cipher_spec();
+			let mut session = self.session.borrow_mut();
+			session.receive_change_cipher_spec();
 			return Ok(())
 		}
 
@@ -322,6 +324,9 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 						server_public.unwrap(),
 						&slice[5..]
 					);
+					// Key exchange occurred, seq_num is set to 0
+					// Do NOT update seq_num again. Early return.
+					return Ok(());
 				}
 			},
 
@@ -336,6 +341,48 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				// ExcepytedExtensions are disguised as ApplicationData
 				// Pull out the `payload` from TlsRepr, decrypt as EE
 				let mut payload = repr.payload.take().unwrap();
+				log::info!("Encrypted payload: {:?}", payload);
+				let mut array: [u8; 5] = [0; 5];
+				let mut buffer = TlsBuffer::new(&mut array);
+				buffer.write_u8(repr.content_type.into())?;
+				buffer.write_u16(repr.version.into())?;
+				buffer.write_u16(repr.length)?;
+				let associated_data: &[u8] = buffer.into();
+				log::info!("Associated Data: {:?}", associated_data);
+				{
+					self.session.borrow_mut().decrypt_in_place(
+						associated_data,
+						&mut payload
+					);
+				}
+				log::info!("decrypted EE");
+				log::info!("{:?}", payload);
+
+				// TODO: Parse payload of EE
+				let parse_result = parse_handshake(&payload);
+				let (_, encrypted_extensions_handshake) = parse_result
+					.map_err(|_| Error::Unrecognized)?;
+				// TODO: Process payload
+				// Practically, nothing will be done about cookies/server name
+				// Extension processing is therefore skipped
+				log::info!("Parsed EE");
+				self.session.borrow_mut().client_update_for_ee();
+			},
+
+			// In this stage, wait for a certificate from server
+			// Parse the certificate and check its content
+			TlsState::WAIT_CERT_CR => {
+				// Check that the packet is classified as application data
+				// Certificates transfer is disguised as application data
+				if !repr.is_application_data() {
+					// Abort communication, this affect IV calculation
+					todo!()
+				}
+
+				// Pull out the `payload` from TlsRepr, decrypt as EE
+				let mut payload = repr.payload.take().unwrap();
+
+				// Instantiate associated data and decrypt
 				let mut array: [u8; 5] = [0; 5];
 				let mut buffer = TlsBuffer::new(&mut array);
 				buffer.write_u8(repr.content_type.into())?;
@@ -343,35 +390,20 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				buffer.write_u16(repr.length)?;
 				let associated_data: &[u8] = buffer.into();
 				{
-					self.session.borrow().decrypt_in_place(
+					self.session.borrow_mut().decrypt_in_place(
 						associated_data,
 						&mut payload
 					);
 				}
 				log::info!("Decrypted payload {:?}", payload);
-
-				// TODO: Parse payload of EE
-				let parse_result = parse_handshake(&payload);
-				let (_, encrypted_extensions_handshake) = parse_result
-					.map_err(|_| Error::Unrecognized)?;
-
-				// TODO: Process payload
-				// Practically, nothing will be done about cookies/server name
-				// Extension processing is therefore skipped
-				log::info!("EE handshake: {:?}", encrypted_extensions_handshake);
-
-				self.session.borrow_mut().client_update_for_ee();
-				log::info!("Transition to WAIT_CERT_CR");
-			},
-
-			// In this stage, wait for a certificate from server
-			// Parse the certificate and check its content
-			TlsState::WAIT_CERT_CR => {
-
 			},
 
 			_ => {},
 		}
+
+		// A TLS Record was received and processed and verified
+		// Increment sequence number
+		self.session.borrow_mut().increment_sequence_number();
 
 		Ok(())
 	}
@@ -386,6 +418,9 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 		let mut buffer = TlsBuffer::new(&mut array);
 		buffer.enqueue_tls_repr(tls_repr)?;
 		let buffer_size = buffer.get_size();
+
+		// Force send to return if send is unsuccessful
+		// Only update sequence number if the send is successful
 		tcp_socket.send_slice(buffer.into())
 			.and_then(
 				|size| if size == buffer_size {
@@ -393,10 +428,15 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				} else {
 					Err(Error::Truncated)
 				}
-			)
+			)?;
+		self.session.borrow_mut().increment_sequence_number();
+		Ok(())
 	}
 
 	// Generic inner send method for buffer IO, through TCP socket
+	// Usage: Push a slice representation of ONE TLS packet
+	// This function will only increment sequence number by 1
+	// Repeatedly call this function if sending multiple TLS packets is needed
 	fn send_tls_slice(&self, sockets: &mut SocketSet, slice: &[u8]) -> Result<()> {
 		let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
 		if !tcp_socket.can_send() {
@@ -410,11 +450,14 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 				} else {
 					Err(Error::Truncated)
 				}
-			)
+			)?;
+		self.session.borrow_mut().increment_sequence_number();
+		Ok(())
 	}
 
 	// Generic inner recv method, through TCP socket
-	// A TCP packet can contain multiple TLS segments
+	// A TCP packet can contain multiple TLS records (including 0)
+	// Therefore, sequence nubmer incrementation is not completed here
 	fn recv_tls_repr<'a>(&'a self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec::<TlsRepr>> {
 		let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
 		if !tcp_socket.can_recv() {

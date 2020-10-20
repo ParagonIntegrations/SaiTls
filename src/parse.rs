@@ -1,7 +1,9 @@
 use nom::IResult;
 use nom::bytes::complete::take;
 use nom::bytes::complete::tag;
+use nom::bytes::complete::take_till;
 use nom::combinator::complete;
+use nom::sequence::preceded;
 use nom::sequence::tuple;
 use nom::error::ErrorKind;
 use smoltcp::Error;
@@ -54,6 +56,11 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
     Ok((rest, repr))
 }
 
+// TODO: Redo EE
+// Not very appropriate to classify EE as proper handshake
+// It may include multiple handshakes
+// Solution 1: Parse handshake again -> Recursion & return type
+// Solution 2: Force caller to parse in a loop -> Extra parser to handle EE
 pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
     let handshake_type = take(1_usize);
     let length = take(3_usize);
@@ -151,6 +158,15 @@ fn parse_server_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
     Ok((rest, HandshakeData::ServerHello(server_hello)))
 }
 
+// For reference: This is the structure of encrypted text
+// Source: RFC 8446 Section 5.2
+//
+// struct {
+//     opaque content[TLSPlaintext.length];
+//     ContentType type;
+//     uint8 zeros[length_of_padding];
+// } TLSInnerPlaintext;
+
 fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtensions> {
     let (mut rest, extension_length) = take(2_usize)(bytes)?;
     let extension_length: u16 = NetworkEndian::read_u16(extension_length);
@@ -184,7 +200,12 @@ fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtension
     
     // Force completeness. The entire slice is meant to be processed.
     complete(
-        take(0_usize)
+        preceded(
+            take(0_usize),
+            // There may be zeroes beyond the content_type
+            // Take "0" out until no more chaining zeros are found
+            take_till(|byte| byte == 0)
+        )
     )(rest)?;
 
 	Ok((rest, encrypted_extensions))

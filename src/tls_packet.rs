@@ -189,6 +189,7 @@ pub(crate) enum HandshakeData<'a> {
 	ClientHello(ClientHello<'a>),
 	ServerHello(ServerHello<'a>),
 	EncryptedExtensions(EncryptedExtensions),
+	Certificate(Certificate<'a>),
 }
 
 impl<'a> HandshakeData<'a> {
@@ -643,4 +644,33 @@ pub(crate) enum ServerNameContent {
 pub(crate) struct ServerName {
 	name_type: NameType,
 	name: ServerNameContent,
+}
+
+// Note: X.509 format is always selected unless negotiated
+// This TLS implementation still yet to support certificate negotiation
+#[derive(Debug, Clone)]
+pub(crate) enum CertificateEntryInfo<'a> {
+	RawPublicKey {
+		ASN1_subjectPublicKeyInfo_length: u32,	// Only 24 bits
+		ASN1_subjectPublicKeyInfo: &'a [u8],
+	},
+	X509 {
+		cert_data_length: u32,					// Only 24 bits
+		cert_data: &'a [u8],
+	}
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CertificateEntry<'a> {
+	certificate_entry_into: CertificateEntryInfo<'a>,
+	extensions_length: u16,
+	extensions: Vec<Extension>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Certificate<'a> {
+	certificate_request_context_length: u8,		// 0 length unless responding to CERT_REQUEST
+	certificate_request_context: &'a [u8],
+	certificate_list_length: u32,				// Only 24 bits
+	certificate_list: &'a [CertificateEntry<'a>],
 }

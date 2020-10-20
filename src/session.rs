@@ -7,6 +7,7 @@ use chacha20poly1305::ChaCha20Poly1305;
 use ccm::Ccm;
 use hkdf::Hkdf;
 use generic_array::GenericArray;
+use byteorder::{ByteOrder, NetworkEndian, BigEndian};
 
 use core::convert::AsRef;
 use core::cell::RefCell;
@@ -44,6 +45,11 @@ pub(crate) struct Session {
 	// Always 12 bytes long
 	client_nonce: Option<Vec<u8, U12>>,
 	server_nonce: Option<Vec<u8, U12>>,
+	// Sequence number: Start from 0, 64 bits
+	// Increment by one per record processed (read OR write)
+	// Reset to 0 on rekey AND key exchange
+	// TODO: Force rekey if sequence_number need to wrap
+	sequence_number: u64,
 }
 
 impl Session {
@@ -66,6 +72,7 @@ impl Session {
 			server_traffic_secret: None,
 			client_nonce: None,
 			server_nonce: None,
+			sequence_number: 0,
 		}
 	}
 
@@ -87,6 +94,8 @@ impl Session {
 	}
 
 	// State transition from WAIT_SH to WAIT_EE
+	// TODO: Memory allocation
+	// It current dumps too much memory onto the stack on invocation
 	pub(crate) fn client_update_for_sh(
 		&mut self,
 		cipher_suite: CipherSuite,
@@ -105,8 +114,6 @@ impl Session {
 				.unwrap()
 				.diffie_hellman(&encoded_point)
 				.unwrap();
-
-		log::info!("Shared secret: {:?}", ecdhe_shared_secret.as_bytes());
 
 		// Generate Handshake secret
 		match cipher_suite {
@@ -218,7 +225,7 @@ impl Session {
 				let server_handshake_iv: Vec<u8, U12> = {
 					let mut server_handshake_iv_holder = Vec::from_slice(&[0; 12]).unwrap();
 					hkdf_expand_label(
-						&client_handshake_traffic_secret_hkdf,
+						&server_handshake_traffic_secret_hkdf,
 						"iv",
 						"",
 						&mut server_handshake_iv_holder
@@ -413,6 +420,9 @@ impl Session {
 			}
 		};
 		self.state = TlsState::WAIT_EE;
+
+		// Key exchange occurred, set seq_num to 0.
+		self.sequence_number = 0;
 	}
 
 	pub(crate) fn client_update_for_ee(&mut self) {
@@ -454,8 +464,15 @@ impl Session {
 				self.server_cipher.as_ref().unwrap()
 			)},
 		};
+
+		// Calculate XOR'ed nonce
+		let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
+		let clipped_seq_num: u128 = self.sequence_number.into();
+		let mut processed_nonce: [u8; 12] = [0; 12];
+		NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
+
 		cipher.encrypt_in_place(
-			&GenericArray::from_slice(nonce),
+			&GenericArray::from_slice(&processed_nonce),
 			associated_data,
 			buffer
 		)
@@ -476,11 +493,22 @@ impl Session {
 				self.server_cipher.as_ref().unwrap()
 			)},
 		};
+
+		// Calculate XOR'ed nonce
+		let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
+		let clipped_seq_num: u128 = self.sequence_number.into();
+		let mut processed_nonce: [u8; 12] = [0; 12];
+		NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
+
 		cipher.decrypt_in_place(
-			&GenericArray::from_slice(nonce),
+			&GenericArray::from_slice(&processed_nonce),
 			associated_data,
 			buffer
 		)
+	}
+
+	pub(crate) fn increment_sequence_number(&mut self) {
+		self.sequence_number += 1;
 	}
 }
 
