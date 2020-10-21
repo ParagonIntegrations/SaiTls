@@ -10,12 +10,12 @@ use core::convert::TryFrom;
 
 #[derive(Debug, Clone)]
 pub struct HkdfLabel<'a> {
-	// Length of hash function
-	pub length: u16,
-	// Label vector: "tls13 " + label
+    // Length of hash function
+    pub length: u16,
+    // Label vector: "tls13 " + label
     pub label_length: u8,
-	pub label: &'a [u8],
-	// Context vector: Hashed message
+    pub label: &'a [u8],
+    // Context vector: Hashed message
     pub context_length: u8,
     pub context: &'a [u8],
 }
