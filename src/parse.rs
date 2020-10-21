@@ -5,6 +5,7 @@ use nom::bytes::complete::take_till;
 use nom::combinator::complete;
 use nom::sequence::preceded;
 use nom::sequence::tuple;
+use nom::error::make_error;
 use nom::error::ErrorKind;
 use smoltcp::Error;
 use smoltcp::Result;
@@ -12,7 +13,18 @@ use smoltcp::Result;
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
 
 use crate::tls_packet::*;
+use crate::certificate::Certificate as Asn1DerCertificate;
+use crate::certificate::Version as Asn1DerVersion;
+use crate::certificate::AlgorithmIdentifier as Asn1DerAlgId;
+
 use core::convert::TryFrom;
+use core::convert::TryInto;
+
+use asn1_der::{
+    DerObject,
+    typed::{ DerEncodable, DerDecodable },
+    Asn1DerError,
+};
 
 use alloc::vec::Vec;
 
@@ -326,4 +338,116 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
             extension_data
         }
     ))
+}
+
+pub fn parse_asn1_der_header(bytes: &[u8]) -> IResult<&[u8], (u8, usize)> {
+    // Parse tag
+    let (rest, tag) = take(1_usize)(bytes)?;
+    // Parse length
+    let (rest, length_byte) = take(1_usize)(rest)?;
+    if length_byte[0] <= 0x7F {
+        Ok((rest, (tag[0], length_byte[0].into())))
+    } else {
+        if length_byte[0] & 0x7F > core::mem::size_of::<usize>().try_into().unwrap() {
+            return Err(nom::Err::Failure((length_byte, ErrorKind::TooLarge)));
+        }
+
+        let length_size = length_byte[0] & 0x7F;
+        let (rem, length_slice) = take(length_size)(rest)?;
+        let mut length_array: [u8; 8] = [0; 8];
+        for array_index in 0..length_slice.len() {
+            length_array[array_index + 8 - length_slice.len()] = length_slice[array_index];
+        }
+        Ok((rem, (tag[0], usize::from_be_bytes(length_array))))
+    }
+}
+
+pub fn parse_asn1_der_object(bytes: &[u8]) -> IResult<&[u8], (u8, usize, &[u8])> {
+    let (rest, (tag, length)) = parse_asn1_der_header(bytes)?;
+    let (rest, value) = take(length)(rest)?;
+    Ok((rest, (tag, length, value)))
+}
+
+pub fn parse_asn1_der_certificate(bytes: &[u8]) -> IResult<&[u8], (&[u8], &[u8], &[u8])> {
+    let (_, (_, _, rest)) = parse_asn1_der_object(bytes)?;
+    let (rest, (_, _, tbscertificate_slice)) = parse_asn1_der_object(rest)?;
+    let (rest, (_, _, signature_alg)) = parse_asn1_der_object(rest)?;
+    let (rest, (_, _, sig_val)) = parse_asn1_der_object(rest)?;
+    Ok((rest, (tbscertificate_slice, signature_alg, sig_val)))
+}
+
+pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Vec<&[u8]>> {
+    todo!()
+}
+
+// version: [0] EXPLICIT Version DEFAULT V1
+// Version encapsulates an Integer
+// i.e. context-specific, constructed, type [0] -> tag: A0
+pub fn parse_asn1_der_version(bytes: &[u8]) -> IResult<&[u8], Asn1DerVersion> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag is indeed 0xA0
+    if tag_val != 0xA0 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    // Parse the encapsulated INTEGER, force completeness
+    let (_, integer) = complete(parse_asn1_der_integer)(value)?;
+    // Either 0, 1, or 2, take the last byte and assert all former bytes to be 0
+    let (zeroes, version_byte) = take(integer.len()-1)(integer)?;
+    complete(take_till(|byte| byte != 0))(zeroes)?;
+    Ok((rest, Asn1DerVersion::try_from(version_byte[0]).unwrap()))
+}
+
+// INTEGER: tag: 0x02
+pub fn parse_asn1_der_integer(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag is indeed 0x02
+    if tag_val != 0x02 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    Ok((rest, value))
+}
+
+// CertificateSerialNumber: alias of INTEGER
+pub fn parse_asn1_der_serial_number(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    parse_asn1_der_integer(bytes)
+}
+
+// Algorithm Identifier: Sequence -> universal, constructed, 0 (0x30)
+// Encapsulates OID (alg) and optional params (params)
+pub fn parse_asn1_der_algorithm_identifier(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag_val is indeed 0x30
+    if tag_val != 0x30 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    // Parse OID and then optionl parameters
+    let (_, (oid, (_, _, optional_param))) = complete(
+        tuple((
+            parse_asn1_der_oid,
+            parse_asn1_der_object
+        ))
+    )(value)?;
+    Ok((
+        rest,
+        Asn1DerAlgId {
+            algorithm: oid,
+            parameters: optional_param,
+        }
+    ))
+}
+
+// Parser for Universal OID type (0x06)
+pub fn parse_asn1_der_oid(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag_val is indeed 0x06
+    if tag_val != 0x06 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    Ok((rest, value))
+}
+
+// Parser for Time Validity Structure
+pub fn parse_asn1_der_validity(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    
 }
