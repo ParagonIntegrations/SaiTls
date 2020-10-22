@@ -16,6 +16,10 @@ use crate::tls_packet::*;
 use crate::certificate::Certificate as Asn1DerCertificate;
 use crate::certificate::Version as Asn1DerVersion;
 use crate::certificate::AlgorithmIdentifier as Asn1DerAlgId;
+use crate::certificate::Time as Asn1DerTime;
+use crate::certificate::Validity as Asn1DerValidity;
+use crate::certificate::SubjectPublicKeyInfo as Asn1DerSubjectPublicKeyInfo;
+use crate::certificate::Extensions as Asn1DerExtensions;
 
 use core::convert::TryFrom;
 use core::convert::TryInto;
@@ -362,6 +366,8 @@ pub fn parse_asn1_der_header(bytes: &[u8]) -> IResult<&[u8], (u8, usize)> {
     }
 }
 
+// TODO: Not return length
+// It is quite useless when the value slice of the exact same length is returned
 pub fn parse_asn1_der_object(bytes: &[u8]) -> IResult<&[u8], (u8, usize, &[u8])> {
     let (rest, (tag, length)) = parse_asn1_der_header(bytes)?;
     let (rest, value) = take(length)(rest)?;
@@ -402,6 +408,26 @@ pub fn parse_asn1_der_integer(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
     let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0x02
     if tag_val != 0x02 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    // Consume the leading 0x00 byte
+    let (value, _) = tag(&[0x00])(value)?;
+    Ok((rest, value))
+}
+
+// BIT STRING: tag: 0x03
+// Assumption: No unused bits at the last byte
+// Public keys are always represented in bytes
+pub fn parse_asn1_der_bit_string(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag is indeed 0x03
+    if tag_val != 0x03 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    // Dump `unused_bit` field
+    let (value, unused_bit_byte) = take(1_usize)(value)?;
+    // Assert no unused bits, otherwise it is a malformatted key
+    if value[0] != 0 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
     Ok((rest, value))
@@ -446,8 +472,77 @@ pub fn parse_asn1_der_oid(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
     Ok((rest, value))
 }
 
-// Parser for Time Validity Structure
-pub fn parse_asn1_der_validity(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+// Parser for Time Validity Sequence Structure (0x30)
+pub fn parse_asn1_der_validity(bytes: &[u8]) -> IResult<&[u8], Asn1DerValidity> {
     let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
-    
+    // Verify the tag_val is indeed 0x30
+    if tag_val != 0x30 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    let (_, (not_before, not_after)) = complete(
+        tuple((
+            parse_ans1_der_time,
+            parse_ans1_der_time
+        ))
+    )(value)?;
+    Ok((
+        rest,
+        Asn1DerValidity {
+            not_before,
+            not_after,
+        }
+    ))
+}
+
+// Parser for Time Representation (0x17: UTCTime, 0x18: GeneralizedTime)
+pub fn parse_ans1_der_time(bytes: &[u8]) -> IResult<&[u8], Asn1DerTime> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Handle UTCTime, Gen.Time and Invalid Tag values
+    match tag_val {
+        0x17 => {
+            Ok((
+                rest,
+                Asn1DerTime::UTCTime(value)
+            ))
+        },
+        0x18 => {
+            Ok((
+                rest,
+                Asn1DerTime::GeneralizedTime(value)
+            ))
+        },
+        _ => Err(nom::Err::Failure((&[], ErrorKind::Verify)))
+    }
+}
+
+// Parser for SubjectKeyPublicInfo (Sequence: 0x30)
+pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], Asn1DerSubjectPublicKeyInfo> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag_val is indeed 0x30
+    if tag_val != 0x30 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    let (_, (algorithm, subject_public_key)) = complete(
+        tuple((
+            parse_asn1_der_algorithm_identifier,
+            parse_asn1_der_bit_string,
+        ))
+    )(value)?;
+    Ok((
+        rest,
+        Asn1DerSubjectPublicKeyInfo {
+            algorithm,
+            subject_public_key
+        }
+    ))
+}
+
+// Parser for extensions (Sequence: 0xA3)
+pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensions> {
+    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag_val is indeed 0xA3
+    if tag_val != 0xA3 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    todo!()
 }
