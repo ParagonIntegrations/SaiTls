@@ -370,7 +370,8 @@ pub fn parse_asn1_der_header(bytes: &[u8]) -> IResult<&[u8], (u8, usize)> {
         for array_index in 0..length_slice.len() {
             length_array[array_index + 8 - length_slice.len()] = length_slice[array_index];
         }
-        Ok((rem, (tag[0], usize::from_be_bytes(length_array))))
+        let (_, length_array) = length_array.split_at(8 - core::mem::size_of::<usize>());
+        Ok((rem, (tag[0], usize::from_be_bytes((*length_array).try_into().unwrap()))))
     }
 }
 
