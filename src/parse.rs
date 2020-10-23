@@ -128,6 +128,9 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
                 )(rest)?;
 
                 Ok((&[], repr))
+            },
+            Certificate => {
+                todo!()
             }
             _ => todo!()
         }
