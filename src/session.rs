@@ -429,6 +429,10 @@ impl Session {
         self.state = TlsState::WAIT_CERT_CR;
     }
 
+    pub(crate) fn client_update_for_wait_cert_cr(&mut self) {
+        self.state = TlsState::WAIT_CV;
+    }
+
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
         if let Some(session_id_inner) = self.session_id {
             session_id_inner == session_id_echo

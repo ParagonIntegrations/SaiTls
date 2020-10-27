@@ -34,7 +34,7 @@ use alloc::vec::{ self, Vec };
 
 use crate::Error as TlsError;
 use crate::tls_packet::*;
-use crate::parse::{ parse_tls_repr, parse_handshake };
+use crate::parse::{ parse_tls_repr, parse_handshake, parse_inner_plaintext_for_handshake };
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
 
@@ -163,6 +163,10 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
             // TLS Client wait for server's certificate
             // No need to send anything
             TlsState::WAIT_CERT_CR => {},
+
+            // TLS Client wait for server's certificate cerify
+            // No need to send anything
+            TlsState::WAIT_CV=> {},
 
             _ => todo!()
         }
@@ -341,32 +345,41 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                 // ExcepytedExtensions are disguised as ApplicationData
                 // Pull out the `payload` from TlsRepr, decrypt as EE
                 let mut payload = repr.payload.take().unwrap();
-                log::info!("Encrypted payload: {:?}", payload);
                 let mut array: [u8; 5] = [0; 5];
                 let mut buffer = TlsBuffer::new(&mut array);
                 buffer.write_u8(repr.content_type.into())?;
                 buffer.write_u16(repr.version.into())?;
                 buffer.write_u16(repr.length)?;
                 let associated_data: &[u8] = buffer.into();
-                log::info!("Associated Data: {:?}", associated_data);
                 {
                     self.session.borrow_mut().decrypt_in_place(
                         associated_data,
                         &mut payload
                     );
                 }
-                log::info!("decrypted EE");
-                log::info!("{:?}", payload);
 
-                // TODO: Parse payload of EE
-                let parse_result = parse_handshake(&payload);
-                let (_, encrypted_extensions_handshake) = parse_result
+                let parse_result = parse_inner_plaintext_for_handshake(&payload);
+                let (_, mut handshake_vec) = parse_result
                     .map_err(|_| Error::Unrecognized)?;
+
+                // Verify that it is indeed an EE
+                let might_be_ee = handshake_vec.remove(0);
+                if might_be_ee.get_msg_type() != HandshakeType::EncryptedExtensions {
+                    // Process the other handshakes in "handshake_vec"
+                    todo!()
+                }
+
                 // TODO: Process payload
+
                 // Practically, nothing will be done about cookies/server name
                 // Extension processing is therefore skipped
-                log::info!("Parsed EE");
                 self.session.borrow_mut().client_update_for_ee();
+
+                // TODO: Handle in WAIT_CERT_CR if there are still unprocessed handshakes
+                // Ideas: 1. Split off WAIT_CERT_CR handling into a separate function
+                //              so WAIT_EE branch can jsut call WAIT_CERT_CR branch
+                //              if there are extra handshake unprocessed
+                // 2. Merge state dependent listeners into 1 branch, execute conditionally
             },
 
             // In this stage, wait for a certificate from server
@@ -395,7 +408,26 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                         &mut payload
                     );
                 }
-                log::info!("Decrypted payload {:?}", payload);
+                // log::info!("Decrypted payload {:?}", payload);
+
+                // Parse the certificate from TLS payload
+                let parse_result = parse_inner_plaintext_for_handshake(&payload);
+                let (_, mut handshake_vec) = parse_result
+                    .map_err(|_| Error::Unrecognized)?;
+                
+                log::info!("Decrypted certificate {:X?}", handshake_vec);
+
+                // Verify that it is indeed an Certificate
+                let might_be_ee = handshake_vec.remove(0);
+                if might_be_ee.get_msg_type() != HandshakeType::Certificate {
+                    // Process the other handshakes in "handshake_vec"
+                    todo!()
+                }
+
+                // TODO: Process Certificate
+
+                // Update session TLS state to WAIT_CV
+                self.session.borrow_mut().client_update_for_wait_cert_cr();
             },
 
             _ => {},

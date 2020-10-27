@@ -32,12 +32,6 @@ use crate::certificate::{
 use core::convert::TryFrom;
 use core::convert::TryInto;
 
-use asn1_der::{
-    DerObject,
-    typed::{ DerEncodable, DerDecodable },
-    Asn1DerError,
-};
-
 use alloc::vec::Vec;
 
 pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
@@ -80,6 +74,40 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
     Ok((rest, repr))
 }
 
+// Convert TlsInnerPlainText in RFC 8446 into Handshake
+// Diff from regular handshake:
+// 1. Handshake can coalesced into a larger TLS record
+// 2. Content type and zero paddings at the end
+pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8], Vec<HandshakeRepr>> {
+    let mut remaining_bytes = bytes;
+    let mut handshake_vec: Vec<HandshakeRepr> = Vec::new();
+    
+    while true {
+        // Perform check on the number of remaining bytes
+        // Case 1: At most 4 bytes left, then that must be the content type of the TLS record
+        //         Assert that it is indeed handshake (0x16)
+        // Case 2: More than 4 byte left, then that must either be
+        //      2.1: Another handshake representation
+        //      2.2: Content type | Zero padding, which can be detected by 0 length
+        if remaining_bytes.len() <= 4 || 
+            NetworkEndian::read_u24(&remaining_bytes[1..4]) == 0 {
+            complete(
+                preceded(
+                    tag(&[0x16]),
+                    take_till(|byte| byte != 0x00)
+                )
+            )(remaining_bytes)?;
+            return Ok((&[], handshake_vec));
+        }
+
+        let (rem, handshake_repr) = parse_handshake(remaining_bytes)?;
+        remaining_bytes = rem;
+        handshake_vec.push(handshake_repr);
+    }
+
+    unreachable!()
+}
+
 // TODO: Redo EE
 // Not very appropriate to classify EE as proper handshake
 // It may include multiple handshakes
@@ -106,31 +134,26 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
                 Ok((rest, repr))
             },
             EncryptedExtensions => {
-                // Split data into EE and the last TLS content byte
-                let (tls_content_byte, ee_data) = take(repr.length)(rest)?;
-
-                // Process TLS content byte.
-                complete(
-                    tag(&[0x16])
-                )(tls_content_byte)?;
-
                 // Process EE
                 let (rest, handshake_data) = parse_encrypted_extensions(
-                    ee_data
+                    rest
                 )?;
                 repr.handshake_data = HandshakeData::EncryptedExtensions(
                     handshake_data
                 );
 
-                // Verify that all bytes are comsumed
-                complete(
-                    take(0_usize)
-                )(rest)?;
-
-                Ok((&[], repr))
+                Ok((rest, repr))
             },
             Certificate => {
-                todo!()
+                // Process Certificate
+                let (rest, handshake_data) = parse_handshake_certificate(
+                    rest
+                )?;
+                repr.handshake_data = HandshakeData::Certificate(
+                    handshake_data
+                );
+
+                Ok((rest, repr))
             }
             _ => todo!()
         }
@@ -227,15 +250,105 @@ fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtension
     
     // Force completeness. The entire slice is meant to be processed.
     complete(
-        preceded(
-            take(0_usize),
-            // There may be zeroes beyond the content_type
-            // Take "0" out until no more chaining zeros are found
-            take_till(|byte| byte == 0)
-        )
+        take(0_usize)
     )(rest)?;
 
 	Ok((rest, encrypted_extensions))
+}
+
+fn parse_handshake_certificate(bytes: &[u8]) -> IResult<&[u8], Certificate> {
+    let (rest, certificate_request_context_length) = take(1_usize)(bytes)?;
+    let certificate_request_context_length = certificate_request_context_length[0];
+
+    let (rest, certificate_request_context) = take(
+        certificate_request_context_length
+    )(rest)?;
+
+    let (mut rest, certificate_list_length) = take(3_usize)(rest)?;
+    let certificate_list_length = NetworkEndian::read_u24(certificate_list_length);
+
+    let mut certificate_struct = Certificate {
+        certificate_request_context_length,
+        certificate_request_context,
+        certificate_list_length,
+        certificate_list: Vec::new()
+    };
+
+    let mut certificate_list_length_counter: i32 = i32::try_from(certificate_list_length).unwrap();
+    while certificate_list_length_counter > 0 {
+        let (rem, (certificate_entry_length, certificate_entry)) =
+            parse_handshake_certificate_entry(rest)?;
+        
+        certificate_list_length_counter -= i32::try_from(certificate_entry_length).unwrap();
+        rest = rem;
+        certificate_struct.certificate_list.push(certificate_entry);
+    }
+
+    Ok((
+        rest,
+        certificate_struct
+    ))
+
+}
+
+fn parse_handshake_certificate_entry(bytes: &[u8]) -> IResult<&[u8], (u32, CertificateEntry)> {
+    let (rest, (cert_entry_info_size, cert_entry_info)) = 
+        parse_handshake_certificate_entry_info(bytes)?;
+    
+    let (mut rest, extensions_length) = take(2_usize)(rest)?;
+    let extensions_length = NetworkEndian::read_u16(extensions_length);
+
+    let mut extension_vec: Vec<Extension> = Vec::new();
+    let mut extension_length_counter: i32 = extensions_length.into();
+    while extension_length_counter > 0 {
+        let (rem, extension) = parse_extension(rest, HandshakeType::ServerHello)?;
+        rest = rem;
+        extension_length_counter -= i32::try_from(extension.get_length()).unwrap();
+
+        // Todo:: Proper error
+        if extension_length_counter < 0 {
+            todo!()
+        }
+
+        extension_vec.push(extension);
+    }
+
+    Ok((
+        rest,
+        (
+            u32::try_from(extensions_length).unwrap() + 2 + cert_entry_info_size,
+            CertificateEntry {
+                certificate_entry_info: cert_entry_info,
+                extensions_length,
+                extensions: extension_vec
+            }
+        )
+    ))
+}
+
+fn parse_handshake_certificate_entry_info(bytes: &[u8]) -> IResult<&[u8], (u32, CertificateEntryInfo)> {
+    // Only supports X.509 certificate
+    // No negotiation for other certificate types in prior
+    let (rest, cert_data_length) = take(3_usize)(bytes)?;
+    let cert_data_length = NetworkEndian::read_u24(cert_data_length);
+
+    // Take the portion of bytes indicated by cert_data_length, and parse as
+    // X509 certificate.
+    let (rest, cert_data) = take(cert_data_length)(rest)?;
+    let (_, cert_data) = complete(
+        parse_asn1_der_certificate
+    )(cert_data)?;
+
+    Ok((
+        rest,
+        (
+            cert_data_length + 3,
+            CertificateEntryInfo::X509 {
+                cert_data_length,
+                cert_data
+            }
+        )
+    ))
 }
 
 fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8], Extension> {

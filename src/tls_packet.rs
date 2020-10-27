@@ -78,6 +78,8 @@ impl<'a> TlsRepr<'a> {
         self
     }
 
+    // TODO: Consider replace all these boolean function
+    // into a single function that returns the HandshakeType.
     pub(crate) fn is_server_hello(&self) -> bool {
         self.content_type == TlsContentType::Handshake &&
         self.payload.is_none() &&
@@ -155,6 +157,10 @@ impl<'a, 'b> HandshakeRepr<'a> {
         length += 3;                    // Length of Handshake data
         length += u16::try_from(self.handshake_data.get_length()).unwrap();
         length
+    }
+
+    pub(crate) fn get_msg_type(&self) -> HandshakeType {
+        self.msg_type
     }
 }
 
@@ -658,21 +664,21 @@ pub(crate) enum CertificateEntryInfo<'a> {
 
     X509 {
         cert_data_length: u32,                      // Only 24 bits
-        cert_data: &'a [u8],
+        cert_data: crate::certificate::Certificate<'a>,
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CertificateEntry<'a> {
-    certificate_entry_into: CertificateEntryInfo<'a>,
-    extensions_length: u16,
-    extensions: Vec<Extension>,
+    pub(crate) certificate_entry_info: CertificateEntryInfo<'a>,
+    pub(crate) extensions_length: u16,
+    pub(crate) extensions: Vec<Extension>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Certificate<'a> {
-    certificate_request_context_length: u8,         // 0 length unless responding to CERT_REQUEST
-    certificate_request_context: &'a [u8],
-    certificate_list_length: u32,                   // Only 24 bits
-    certificate_list: &'a [CertificateEntry<'a>],
+    pub(crate) certificate_request_context_length: u8,         // 0 length unless responding to CERT_REQUEST
+    pub(crate) certificate_request_context: &'a [u8],
+    pub(crate) certificate_list_length: u32,                   // Only 24 bits
+    pub(crate) certificate_list: Vec<CertificateEntry<'a>>,
 }
