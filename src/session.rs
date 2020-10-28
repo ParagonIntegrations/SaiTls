@@ -8,6 +8,7 @@ use ccm::Ccm;
 use hkdf::Hkdf;
 use generic_array::GenericArray;
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use rsa::RSAPublicKey;
 
 use core::convert::AsRef;
 use core::cell::RefCell;
@@ -50,6 +51,9 @@ pub(crate) struct Session {
     // Reset to 0 on rekey AND key exchange
     // TODO: Force rekey if sequence_number need to wrap
     sequence_number: u64,
+    // Certificate public key
+    // For Handling CertificateVerify
+    cert_rsa_public_key: Option<RSAPublicKey>,
 }
 
 impl Session {
@@ -73,6 +77,7 @@ impl Session {
             client_nonce: None,
             server_nonce: None,
             sequence_number: 0,
+            cert_rsa_public_key: None
         }
     }
 
@@ -425,11 +430,18 @@ impl Session {
         self.sequence_number = 0;
     }
 
-    pub(crate) fn client_update_for_ee(&mut self) {
+    pub(crate) fn client_update_for_ee(&mut self, ee_slice: &[u8]) {
+        self.hash.update(ee_slice);
         self.state = TlsState::WAIT_CERT_CR;
     }
 
-    pub(crate) fn client_update_for_wait_cert_cr(&mut self) {
+    pub(crate) fn client_update_for_wait_cert_cr(
+        &mut self,
+        cert_slice: &[u8],
+        cert_rsa_public_key: RSAPublicKey
+    ) {
+        self.hash.update(cert_slice);
+        self.cert_rsa_public_key.replace(cert_rsa_public_key);
         self.state = TlsState::WAIT_CV;
     }
 

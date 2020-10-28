@@ -1,6 +1,5 @@
 #![no_std]
 
-#[macro_use]
 extern crate alloc;
 
 pub mod tls;
@@ -15,10 +14,12 @@ use nom::error::ParseError;
 
 // TODO: Implement errors
 // Details: Encapsulate smoltcp & nom errors
+#[derive(Debug, Clone)]
 pub enum Error {
     PropagatedError(smoltcp::Error),
-    ParsingError(nom::error::ErrorKind),
+    ParsingError,
     EncryptionError,
     DecryptionError,
     CapacityError,
+    SignatureValidationError,
 }

@@ -30,6 +30,11 @@ use aes_gcm::aes::Aes128;
 use aes_gcm::{AeadInPlace, NewAead};
 use sha2::{Sha256, Sha384, Sha512, Digest};
 
+use nom::bytes::complete::take;
+use nom::IResult;
+use nom::error::make_error;
+use nom::error::ErrorKind;
+
 use alloc::vec::{ self, Vec };
 
 use crate::Error as TlsError;
@@ -37,6 +42,7 @@ use crate::tls_packet::*;
 use crate::parse::{ parse_tls_repr, parse_handshake, parse_inner_plaintext_for_handshake };
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
+use crate::certificate::validate_root_certificate;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
@@ -166,7 +172,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
             // TLS Client wait for server's certificate cerify
             // No need to send anything
-            TlsState::WAIT_CV=> {},
+            TlsState::WAIT_CV => {},
 
             _ => todo!()
         }
@@ -359,8 +365,8 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                 }
 
                 let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, mut handshake_vec) = parse_result
-                    .map_err(|_| Error::Unrecognized)?;
+                let (_, (mut handshake_slice, mut handshake_vec)) = 
+                    parse_result.map_err(|_| Error::Unrecognized)?;
 
                 // Verify that it is indeed an EE
                 let might_be_ee = handshake_vec.remove(0);
@@ -373,7 +379,18 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
                 // Practically, nothing will be done about cookies/server name
                 // Extension processing is therefore skipped
-                self.session.borrow_mut().client_update_for_ee();
+                // Update hash of the session, get EE by taking appropriate length of data
+                
+                let (handshake_slice, ee_slice) = 
+                    take::<_, _, (&[u8], ErrorKind)>(
+                        might_be_ee.length + 4
+                    )(handshake_slice)
+                        .map_err(|_| Error::Unrecognized)?;
+
+                self.session.borrow_mut()
+                    .client_update_for_ee(
+                        &ee_slice
+                    );
 
                 // TODO: Handle in WAIT_CERT_CR if there are still unprocessed handshakes
                 // Ideas: 1. Split off WAIT_CERT_CR handling into a separate function
@@ -392,7 +409,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                     todo!()
                 }
 
-                // Pull out the `payload` from TlsRepr, decrypt as EE
+                // Pull out the `payload` from TlsRepr, decrypt as CERT
                 let mut payload = repr.payload.take().unwrap();
 
                 // Instantiate associated data and decrypt
@@ -408,27 +425,77 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                         &mut payload
                     );
                 }
-                // log::info!("Decrypted payload {:?}", payload);
 
                 // Parse the certificate from TLS payload
                 let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, mut handshake_vec) = parse_result
+                let (_, (handshake_slice, mut handshake_vec)) = parse_result
                     .map_err(|_| Error::Unrecognized)?;
-                
-                log::info!("Decrypted certificate {:X?}", handshake_vec);
 
                 // Verify that it is indeed an Certificate
-                let might_be_ee = handshake_vec.remove(0);
-                if might_be_ee.get_msg_type() != HandshakeType::Certificate {
+                let might_be_cert = handshake_vec.remove(0);
+                if might_be_cert.get_msg_type() != HandshakeType::Certificate {
                     // Process the other handshakes in "handshake_vec"
                     todo!()
                 }
 
                 // TODO: Process Certificate
+                let cert = might_be_cert.get_asn1_der_certificate().unwrap();
+                log::info!("Certificate Acquisition");
+                log::info!("Validation {:?}",
+                    validate_root_certificate(cert)
+                );
 
                 // Update session TLS state to WAIT_CV
-                self.session.borrow_mut().client_update_for_wait_cert_cr();
+                let (handshake_slice, cert_slice) = 
+                    take::<_, _, (&[u8], ErrorKind)>(
+                        might_be_cert.length + 4
+                    )(handshake_slice)
+                        .map_err(|_| Error::Unrecognized)?;
+
+                self.session.borrow_mut()
+                    .client_update_for_wait_cert_cr(
+                        &cert_slice,
+                        cert.return_rsa_public_key().unwrap()
+                    );
+
+
             },
+
+            // In this stage, server will eventually send a CertificateVerify
+            // Verify that the signature is indeed correct
+            TlsState::WAIT_CV => {
+                // CertificateVerify is disguised as Application Data
+                if !repr.is_application_data() {
+                    // Abort communication, this affect IV calculation
+                    todo!()
+                }
+
+                // Pull out the `payload` from TlsRepr, decrypt as CV
+                // Keep 1 copy to update hash
+                let mut payload = repr.payload.take().unwrap();
+                let cert_slice = payload.clone();
+
+                // Instantiate associated data and decrypt
+                let mut array: [u8; 5] = [0; 5];
+                let mut buffer = TlsBuffer::new(&mut array);
+                buffer.write_u8(repr.content_type.into())?;
+                buffer.write_u16(repr.version.into())?;
+                buffer.write_u16(repr.length)?;
+                let associated_data: &[u8] = buffer.into();
+                {
+                    self.session.borrow_mut().decrypt_in_place(
+                        associated_data,
+                        &mut payload
+                    );
+                }
+
+                // Parse the certificate from TLS payload
+                let parse_result = parse_inner_plaintext_for_handshake(&payload);
+                let (_, mut handshake_vec) = parse_result
+                    .map_err(|_| Error::Unrecognized)?;
+
+                // Get hash from session, validate signature
+            }
 
             _ => {},
         }

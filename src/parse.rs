@@ -78,7 +78,8 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
 // Diff from regular handshake:
 // 1. Handshake can coalesced into a larger TLS record
 // 2. Content type and zero paddings at the end
-pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8], Vec<HandshakeRepr>> {
+// Return handshake slice for hashing
+pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8], (&[u8], Vec<HandshakeRepr>)> {
     let mut remaining_bytes = bytes;
     let mut handshake_vec: Vec<HandshakeRepr> = Vec::new();
     
@@ -97,7 +98,17 @@ pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8]
                     take_till(|byte| byte != 0x00)
                 )
             )(remaining_bytes)?;
-            return Ok((&[], handshake_vec));
+            return Ok((
+                &[],
+                (
+                    // A concatenation of all handshakes received
+                    // The remaining content_type byte and zero paddings are stripped
+                    &bytes[
+                        ..(bytes.len()-remaining_bytes.len())
+                    ], 
+                    handshake_vec
+                )
+            ));
         }
 
         let (rem, handshake_repr) = parse_handshake(remaining_bytes)?;
@@ -154,7 +165,18 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
                 );
 
                 Ok((rest, repr))
-            }
+            },
+            CertificateVerify => {
+                // Parse CertificateVerify
+                let (rest, handshake_data) = parse_certificate_verify(
+                    rest
+                )?;
+                repr.handshake_data = HandshakeData::CertificateVerify(
+                    handshake_data
+                );
+
+                Ok((rest, repr))
+            },
             _ => todo!()
         }
     }
@@ -351,6 +373,33 @@ fn parse_handshake_certificate_entry_info(bytes: &[u8]) -> IResult<&[u8], (u32, 
     ))
 }
 
+fn parse_certificate_verify(bytes: &[u8]) -> IResult<&[u8], CertificateVerify> {
+    let signature_scheme = take(2_usize);
+    let signature_length = take(2_usize);
+    let (rest, (signature_scheme, signature_length)) = tuple((
+        signature_scheme,
+        signature_length
+    ))(bytes)?;
+
+    let signature_scheme = SignatureScheme::try_from(
+        NetworkEndian::read_u16(signature_scheme)
+    ).unwrap();
+    let signature_length = NetworkEndian::read_u16(signature_length);
+
+    let (_, signature) = complete(
+        take(signature_length)
+    )(rest)?;
+
+    Ok((
+        &[],
+        CertificateVerify {
+            algorithm: signature_scheme,
+            signature_length,
+            signature
+        }
+    ))
+}
+
 fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8], Extension> {
     let extension_type = take(2_usize);
     let length = take(2_usize);
@@ -468,13 +517,18 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
     ))
 }
 
-pub fn parse_asn1_der_header(bytes: &[u8]) -> IResult<&[u8], (u8, usize)> {
+// Parse tag and length
+// Return remaining bytes, tag (as byte), indicated length,
+// and header (tag + length field) length
+pub fn parse_asn1_der_header(bytes: &[u8]) -> IResult<&[u8], (u8, usize, usize)> {
     // Parse tag
     let (rest, tag) = take(1_usize)(bytes)?;
     // Parse length
     let (rest, length_byte) = take(1_usize)(rest)?;
     if length_byte[0] <= 0x7F {
-        Ok((rest, (tag[0], length_byte[0].into())))
+        // Header length is 2 bytes
+        // Tag: 1; Length: 1
+        Ok((rest, (tag[0], length_byte[0].into(), 2)))
     } else {
         if length_byte[0] & 0x7F > core::mem::size_of::<usize>().try_into().unwrap() {
             return Err(nom::Err::Failure((length_byte, ErrorKind::TooLarge)));
@@ -487,21 +541,35 @@ pub fn parse_asn1_der_header(bytes: &[u8]) -> IResult<&[u8], (u8, usize)> {
             length_array[array_index + 8 - length_slice.len()] = length_slice[array_index];
         }
         let (_, length_array) = length_array.split_at(8 - core::mem::size_of::<usize>());
-        Ok((rem, (tag[0], usize::from_be_bytes((*length_array).try_into().unwrap()))))
+        
+        // Header length:
+        // Tag: 1; Length: long_form_indic (1) + size of length (length_size)
+        Ok((
+            rem,
+            (
+                tag[0],
+                usize::from_be_bytes((*length_array).try_into().unwrap()),
+                1 + 1 + usize::try_from(length_size).unwrap()
+            )
+        ))
     }
 }
 
-// TODO: Not return length
-// It is quite useless when the value slice of the exact same length is returned
-// i.e. `length` can be replaced by `value.len()`
+// Length: (return param) returns the length of the entire asn1_der_object
+// Length of the value within the ASN.1 DER object = value.len()
 pub fn parse_asn1_der_object(bytes: &[u8]) -> IResult<&[u8], (u8, usize, &[u8])> {
-    let (rest, (tag, length)) = parse_asn1_der_header(bytes)?;
+    let (rest, (tag, length, header_size)) = parse_asn1_der_header(bytes)?;
     let (rest, value) = take(length)(rest)?;
-    Ok((rest, (tag, length, value)))
+    Ok((rest, (tag, length + header_size, value)))
 }
 
 pub fn parse_asn1_der_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerCertificate> {
     let (excluded, (_, _, rest)) = parse_asn1_der_object(bytes)?;
+
+    // Return encoded TBS certificate in ASN1 DER
+    // For convenience of validation
+    let tbs_certificate_encoded = rest;
+
     let (_, (tbs_certificate, sig_alg, sig_value)) = complete(
         tuple((
             parse_asn1_der_tbs_certificate,
@@ -509,19 +577,24 @@ pub fn parse_asn1_der_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerCertifi
             parse_asn1_der_bit_string
         ))
     )(rest)?;
+
+    let (_, (_, tbs_certificate_length, _)) =
+        parse_asn1_der_object(tbs_certificate_encoded)?;
+
     Ok((
         excluded,
         Asn1DerCertificate {
             tbs_certificate,
             signature_algorithm: sig_alg,
             signature_value: sig_value,
+            tbs_certificate_encoded: &tbs_certificate_encoded[0..tbs_certificate_length]
         }
     ))
 }
 
 // Parser for TBSCertificate (Sequence: 0x30)
 pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerTBSCertificate> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0x30
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -566,7 +639,7 @@ pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerTBS
 // Version encapsulates an Integer
 // i.e. context-specific, constructed, type [0] -> tag: A0
 pub fn parse_asn1_der_version(bytes: &[u8]) -> IResult<&[u8], Asn1DerVersion> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0xA0
     if tag_val != 0xA0 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -579,7 +652,7 @@ pub fn parse_asn1_der_version(bytes: &[u8]) -> IResult<&[u8], Asn1DerVersion> {
 
 // INTEGER: tag: 0x02
 pub fn parse_asn1_der_integer(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0x02
     if tag_val != 0x02 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -591,7 +664,7 @@ pub fn parse_asn1_der_integer(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
 // Assumption: No unused bits at the last byte
 // Public keys are always represented in bytes
 pub fn parse_asn1_der_bit_string(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0x03
     if tag_val != 0x03 {
         return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
@@ -609,10 +682,10 @@ pub fn parse_asn1_der_bit_string(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
 // Length should be 1
 // 0x00 -> false; 0xFF -> true
 pub fn parse_asn1_der_boolean(bytes: &[u8]) -> IResult<&[u8], bool> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0x01 and the length is 1
     // The value should be 0x00 or 0xFF
-    if tag_val != 0x01 || length != 1 || (value[0] != 0x00 && value[0] != 0xFF) {
+    if tag_val != 0x01 || value.len() != 1 || (value[0] != 0x00 && value[0] != 0xFF) {
         return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
     }
     Ok((rest, value[0] == 0xFF))
@@ -620,7 +693,7 @@ pub fn parse_asn1_der_boolean(bytes: &[u8]) -> IResult<&[u8], bool> {
 
 // SEQUENCE: tag: 0x30
 pub fn parse_asn1_der_sequence(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0x03
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -636,7 +709,7 @@ pub fn parse_asn1_der_serial_number(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
 // Algorithm Identifier: Sequence -> universal, constructed, 0 (0x30)
 // Encapsulates OID (alg) and optional params (params)
 pub fn parse_asn1_der_algorithm_identifier(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x30
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -659,7 +732,7 @@ pub fn parse_asn1_der_algorithm_identifier(bytes: &[u8]) -> IResult<&[u8], Asn1D
 
 // Parser for Universal OID type (0x06)
 pub fn parse_asn1_der_oid(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x06
     if tag_val != 0x06 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -669,7 +742,7 @@ pub fn parse_asn1_der_oid(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
 
 // Parser for Time Validity Sequence Structure (0x30)
 pub fn parse_asn1_der_validity(bytes: &[u8]) -> IResult<&[u8], Asn1DerValidity> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x30
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -691,7 +764,7 @@ pub fn parse_asn1_der_validity(bytes: &[u8]) -> IResult<&[u8], Asn1DerValidity> 
 
 // Parser for Time Representation (0x17: UTCTime, 0x18: GeneralizedTime)
 pub fn parse_ans1_der_time(bytes: &[u8]) -> IResult<&[u8], Asn1DerTime> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Handle UTCTime, Gen.Time and Invalid Tag values
     match tag_val {
         0x17 => {
@@ -712,7 +785,7 @@ pub fn parse_ans1_der_time(bytes: &[u8]) -> IResult<&[u8], Asn1DerTime> {
 
 // Parser for SubjectKeyPublicInfo (Sequence: 0x30)
 pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], Asn1DerSubjectPublicKeyInfo> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x30
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -734,13 +807,13 @@ pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], As
 
 // Parser for extensions (Context-specific Sequence: 0xA3, then universal Sequence: 0x30)
 pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensions> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0xA3
     if tag_val != 0xA3 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
 
-    let (_, (tag_val, length, mut value)) = complete(
+    let (_, (tag_val, _, mut value)) = complete(
         parse_asn1_der_object
     )(value)?;
     // Verify the tag_val is indeed 0x30
@@ -763,7 +836,7 @@ pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensio
 
 // Parser for an extension (Sequence: 0x30)
 pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x30
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -825,15 +898,15 @@ pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
 // Parser for KeyUsage Extension, may have bit padding
 // Do not use parse_asn1_der_bit_string, that assumes no bit padding
 pub fn parse_asn1_der_key_usage(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val represents a bitstring, and it must have length 2
     // i.e. bit-padding | bit-string
-    if tag_val != 0x03 || (length != 2 && length != 3) {
+    if tag_val != 0x03 || (value.len() != 2 && value.len() != 3) {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
     // Erase the padded bits
     let padding = value[0];
-    let usage_array: [u8; 2] = if length == 2 {
+    let usage_array: [u8; 2] = if value.len() == 2 {
         [value[1], 0]
     } else {
         [value[1], value[2]]
@@ -849,7 +922,7 @@ pub fn parse_asn1_der_key_usage(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
 
 // Parser for CertificatePolicies Extension (sequence: 0x30)
 pub fn parse_asn1_der_certificate_policies(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
-    let (rest, (tag_val, length, mut value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, mut value)) = parse_asn1_der_object(bytes)?;
     // Verify tag value
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -873,7 +946,7 @@ pub fn parse_asn1_der_certificate_policies(bytes: &[u8]) -> IResult<&[u8], Asn1D
 
 // Parser for PolicyInformation (Sequence: 0x30)
 pub fn parse_asn1_der_policy_information(bytes: &[u8]) -> IResult<&[u8], Asn1DerPolicyInformation> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify tag value
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -897,7 +970,7 @@ pub fn parse_asn1_der_policy_information(bytes: &[u8]) -> IResult<&[u8], Asn1Der
 
 // Parser for BasicConstraints (Sequence: 0x30)
 pub fn parse_asn1_der_basic_constraints(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify tag value
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -929,7 +1002,7 @@ pub fn parse_asn1_der_basic_constraints(bytes: &[u8]) -> IResult<&[u8], Asn1DerE
 
 // Parser for Extended Key Usage Extension (Sequence: 0x30)
 pub fn parse_asn1_der_extended_key_usage(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
-    let (rest, (tag_val, length, mut value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, mut value)) = parse_asn1_der_object(bytes)?;
     // Verify tag value
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
@@ -986,12 +1059,35 @@ pub fn parse_inhibit_any_policy(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
 
 // Parser for octet string (tag: 0x04)
 pub fn parse_asn1_der_octet_string(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (rest, (tag_val, length, value)) = parse_asn1_der_object(bytes)?;
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify tag value
     if tag_val != 0x04 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
     Ok((rest, value))
+}
+
+// Take ASN.1 DER encoded public key
+// Return a slice of modulus, and a slice of exponent
+// Construct numeric value by wrapping rsa::BigUint with the return values
+pub fn parse_asn1_der_rsa_public_key(bytes: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
+    // RSA Public key is a sequence of 2 integers
+    let (_, (tag_val, _, value)) = complete(parse_asn1_der_object)(bytes)?;
+    // Verify tag value
+    if tag_val != 0x30 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+    let (_, (modulus, exponent)) = complete(
+        tuple((
+            parse_asn1_der_integer,
+            parse_asn1_der_integer
+        ))
+    )(value)?;
+
+    Ok((
+        &[],
+        (modulus, exponent)
+    ))
 }
 
 mod oid {

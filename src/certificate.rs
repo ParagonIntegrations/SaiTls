@@ -1,13 +1,21 @@
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 
+use crate::parse::parse_asn1_der_object;
+use crate::parse::parse_asn1_der_rsa_public_key;
+use crate::Error as TlsError;
+
+use sha1::{Sha1, Digest};
+use rsa::{PublicKey, RSAPublicKey, PaddingScheme, BigUint, Hash};
+
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone)]
 pub struct Certificate<'a> {
     pub tbs_certificate: TBSCertificate<'a>,
     pub signature_algorithm: AlgorithmIdentifier<'a>,
-    pub signature_value: &'a [u8]
+    pub signature_value: &'a [u8],
+    pub tbs_certificate_encoded: &'a [u8],
 }
 
 #[derive(Debug, Clone)]
@@ -129,3 +137,60 @@ pub struct AlgorithmIdentifier<'a> {
     pub algorithm: &'a [u8],
     pub parameters: &'a [u8],
 }
+
+// TODO: MOve this to impl block of Certificate
+// Verify self-signed root certificate parsed certificate
+pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
+    // Verify Signature
+    match cert.signature_algorithm.algorithm {
+        SHA1_WITH_RSA_ENCRYPTION => {
+            let mut hasher = Sha1::new();
+            hasher.update(cert.tbs_certificate_encoded);
+
+            // TODO: invoke method to get public key
+            let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
+                cert.tbs_certificate.subject_public_key_info.subject_public_key
+            ).map_err(|_| TlsError::ParsingError)?;
+
+            let rsa_public_key = RSAPublicKey::new(
+                BigUint::from_bytes_be(modulus),
+                BigUint::from_bytes_be(exponent)
+            ).map_err(|_| TlsError::SignatureValidationError)?;
+
+            let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA1));
+            let verify_result = rsa_public_key.verify(
+                padding,
+                &hasher.finalize(),
+                cert.signature_value
+            );
+            log::info!("Verification result: {:?}", verify_result);
+            Ok(verify_result.is_ok())
+        }
+        _ => {
+            todo!()
+        }
+    }
+}
+
+impl<'a> Certificate<'a> {
+    // Return the public key, if used for RSA
+    pub fn return_rsa_public_key(&self) -> Result<RSAPublicKey, ()> {
+        if self.signature_algorithm.algorithm != oid::SHA1_WITH_RSA_ENCRYPTION {
+            return Err(());
+        }
+        let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
+            self.tbs_certificate.subject_public_key_info.subject_public_key
+        ).map_err(|_| ())?;
+
+        RSAPublicKey::new(
+            BigUint::from_bytes_be(modulus),
+            BigUint::from_bytes_be(exponent)
+        ).map_err(|_| ())
+    }
+}
+
+mod oid {
+    // ECDSA signature algorithms
+    pub const SHA1_WITH_RSA_ENCRYPTION: &'static [u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
+}
+

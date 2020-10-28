@@ -12,6 +12,8 @@ use core::convert::TryInto;
 
 use alloc::vec::Vec;
 
+use crate::certificate::Certificate as Asn1DerCertificate;
+
 pub(crate) const HRR_RANDOM: [u8; 32] = [
     0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
     0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
@@ -162,6 +164,19 @@ impl<'a, 'b> HandshakeRepr<'a> {
     pub(crate) fn get_msg_type(&self) -> HandshakeType {
         self.msg_type
     }
+
+    pub(crate) fn get_asn1_der_certificate(&self) -> Result<&Asn1DerCertificate, ()> {
+        if self.msg_type != HandshakeType::Certificate {
+            return Err(())
+        };
+        if let HandshakeData::Certificate(
+            cert
+        ) = &self.handshake_data {
+            Ok(cert.get_certificate(0))
+        } else {
+            Err(())
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -196,6 +211,7 @@ pub(crate) enum HandshakeData<'a> {
     ServerHello(ServerHello<'a>),
     EncryptedExtensions(EncryptedExtensions),
     Certificate(Certificate<'a>),
+    CertificateVerify(CertificateVerify<'a>),
 }
 
 impl<'a> HandshakeData<'a> {
@@ -668,11 +684,31 @@ pub(crate) enum CertificateEntryInfo<'a> {
     }
 }
 
+impl<'a> CertificateEntryInfo<'a> {
+    pub(crate) fn get_certificate(&self) -> &Asn1DerCertificate {
+        match self {
+            CertificateEntryInfo::RawPublicKey {
+                ASN1_subjectPublicKeyInfo_length,
+                ASN1_subjectPublicKeyInfo
+            } => todo!(),
+            CertificateEntryInfo::X509 {
+                cert_data_length, cert_data
+            } => &cert_data
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CertificateEntry<'a> {
     pub(crate) certificate_entry_info: CertificateEntryInfo<'a>,
     pub(crate) extensions_length: u16,
     pub(crate) extensions: Vec<Extension>,
+}
+
+impl<'a> CertificateEntry<'a> {
+    pub(crate) fn get_certificate(&self) -> &Asn1DerCertificate {
+        self.certificate_entry_info.get_certificate()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -681,4 +717,17 @@ pub(crate) struct Certificate<'a> {
     pub(crate) certificate_request_context: &'a [u8],
     pub(crate) certificate_list_length: u32,                   // Only 24 bits
     pub(crate) certificate_list: Vec<CertificateEntry<'a>>,
+}
+
+impl<'a> Certificate<'a> {
+    pub(crate) fn get_certificate(&self, index: usize) -> &Asn1DerCertificate {
+        self.certificate_list[index].get_certificate()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CertificateVerify<'a> {
+    pub(crate) algorithm: SignatureScheme,
+    pub(crate) signature_length: u16,
+    pub(crate) signature: &'a [u8],
 }
