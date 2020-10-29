@@ -1,6 +1,6 @@
 use p256::{ EncodedPoint, ecdh::EphemeralSecret };
 use heapless::{ Vec, consts::* };
-use sha2::{ Digest, Sha256, Sha384, digest::FixedOutput };
+use sha2::{ Digest, Sha256, Sha384, Sha512, digest::FixedOutput };
 use aes_gcm::{ Aes128Gcm, Aes256Gcm, aes::Aes128 };
 use aes_gcm::{ AeadInPlace, NewAead, aead::Buffer };
 use chacha20poly1305::ChaCha20Poly1305;
@@ -8,7 +8,10 @@ use ccm::Ccm;
 use hkdf::Hkdf;
 use generic_array::GenericArray;
 use byteorder::{ByteOrder, NetworkEndian, BigEndian};
-use rsa::RSAPublicKey;
+use rsa::{RSAPublicKey, PublicKey, PaddingScheme, Hash as RSAHash};
+use hmac::{ Hmac, Mac, NewMac };
+
+use rand_core::RngCore;
 
 use core::convert::AsRef;
 use core::cell::RefCell;
@@ -16,7 +19,9 @@ use core::cell::RefCell;
 use crate::tls::TlsState;
 use crate::tls_packet::CipherSuite;
 use crate::key::*;
+use crate::tls_packet::SignatureScheme;
 use crate::Error;
+use crate::fake_rng::FakeRandom;
 
 type Aes128Ccm = Ccm<Aes128, U16, U12>;
 
@@ -157,13 +162,23 @@ impl Session {
                 let client_handshake_traffic_secret = derive_secret(
                     &handshake_secret_hkdf,
                     "c hs traffic",
-                    self.hash.get_sha256_clone()
+                    self.hash.get_sha256_clone().unwrap()
                 );
 
                 let server_handshake_traffic_secret = derive_secret(
                     &handshake_secret_hkdf,
                     "s hs traffic",
-                    self.hash.get_sha256_clone()
+                    self.hash.get_sha256_clone().unwrap()
+                );
+
+                // Store client_handshake_traffic_secret and
+                // server_handshake_traffic_secret
+                // Initial values of both secrets don't matter
+                self.client_traffic_secret.replace(
+                    Vec::from_slice(&client_handshake_traffic_secret).unwrap()
+                );
+                self.server_traffic_secret.replace(
+                    Vec::from_slice(&server_handshake_traffic_secret).unwrap()
                 );
 
                 let client_handshake_traffic_secret_hkdf = Hkdf::<Sha256>::from_prk(&client_handshake_traffic_secret).unwrap();
@@ -335,13 +350,23 @@ impl Session {
                 let client_handshake_traffic_secret = derive_secret(
                     &handshake_secret_hkdf,
                     "c hs traffic",
-                    self.hash.get_sha384_clone()
+                    self.hash.get_sha384_clone().unwrap()
                 );
 
                 let server_handshake_traffic_secret = derive_secret(
                     &handshake_secret_hkdf,
                     "s hs traffic",
-                    self.hash.get_sha384_clone()
+                    self.hash.get_sha384_clone().unwrap()
+                );
+
+                // Store client_handshake_traffic_secret and
+                // server_handshake_traffic_secret
+                // Initial values of both secrets don't matter
+                self.client_traffic_secret.replace(
+                    Vec::from_slice(&client_handshake_traffic_secret).unwrap()
+                );
+                self.server_traffic_secret.replace(
+                    Vec::from_slice(&server_handshake_traffic_secret).unwrap()
                 );
 
                 let client_handshake_traffic_secret_hkdf = Hkdf::<Sha384>::from_prk(&client_handshake_traffic_secret).unwrap();
@@ -443,6 +468,184 @@ impl Session {
         self.hash.update(cert_slice);
         self.cert_rsa_public_key.replace(cert_rsa_public_key);
         self.state = TlsState::WAIT_CV;
+    }
+
+    pub(crate) fn client_update_for_wait_cv(
+        &mut self,
+        cert_verify_slice: &[u8],
+        signature_algorithm: SignatureScheme,
+        signature: &[u8]
+    )
+    {
+        // Clone the transcript hash from ClientHello all the way to Certificate
+        let transcript_hash: Vec<u8, U64> = if let Ok(sha256) = self.hash.get_sha256_clone() {
+            Vec::from_slice(&sha256.finalize()).unwrap()
+        } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+            Vec::from_slice(&sha384.finalize()).unwrap()
+        } else {
+            unreachable!()
+        };
+
+        // Handle Ed25519 and p256 separately
+        // These 2 algorithms have a mandated hash function
+        if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256 ||
+            signature_algorithm == SignatureScheme::ed25519
+        {
+            todo!()
+        }
+
+        // Get verification hash, and verify the signature
+        use crate::tls_packet::SignatureScheme::*;
+
+        let get_rsa_padding_scheme = |sig_alg: SignatureScheme| -> PaddingScheme {
+            match signature_algorithm {
+                rsa_pkcs1_sha256 => {
+                    PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_256))
+                },
+                rsa_pkcs1_sha384 => {
+                    PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_384))
+                },
+                rsa_pkcs1_sha512 => {
+                    PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_512))
+                },
+                rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                    PaddingScheme::new_pss::<Sha256, FakeRandom>(FakeRandom{})
+                },
+                rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                    PaddingScheme::new_pss::<Sha384, FakeRandom>(FakeRandom{})
+                },
+                rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                    PaddingScheme::new_pss::<Sha512, FakeRandom>(FakeRandom{})
+                },
+                _ => unreachable!()
+            }
+        };
+
+        match signature_algorithm {
+            rsa_pkcs1_sha256 | rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                let verify_hash = Sha256::new()
+                    .chain(&[0x20; 64])
+                    .chain("TLS 1.3, server CertificateVerify")
+                    .chain(&[0])
+                    .chain(&transcript_hash)
+                    .finalize();
+                let padding = get_rsa_padding_scheme(signature_algorithm);
+                let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
+                    padding, &verify_hash, signature
+                );
+                log::info!("Algorithm {:?} Certificate verify: {:?}", signature_algorithm, verify_result);
+                if verify_result.is_err() {
+                    todo!()
+                }
+            },
+            rsa_pkcs1_sha384 | rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                let verify_hash = Sha384::new()
+                    .chain(&[0x20; 64])
+                    .chain("TLS 1.3, server CertificateVerify")
+                    .chain(&[0])
+                    .chain(&transcript_hash)
+                    .finalize();
+                let padding = get_rsa_padding_scheme(signature_algorithm);
+                let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
+                    padding, &verify_hash, signature
+                );
+                log::info!("Algorithm {:?} Certificate verify: {:?}", signature_algorithm, verify_result);
+                if verify_result.is_err() {
+                    todo!()
+                }
+            },
+            rsa_pkcs1_sha512 | rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                let verify_hash = Sha512::new()
+                    .chain(&[0x20; 64])
+                    .chain("TLS 1.3, server CertificateVerify")
+                    .chain(&[0])
+                    .chain(&transcript_hash)
+                    .finalize();
+                let padding = get_rsa_padding_scheme(signature_algorithm);
+                let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
+                    padding, &verify_hash, signature
+                );
+                if verify_result.is_err() {
+                    todo!()
+                }
+            },
+            _ => unreachable!()
+        };
+
+        // Usual procedures: update hash
+        self.hash.update(cert_verify_slice);
+
+        // At last, update client state
+        self.state = TlsState::WAIT_FINISHED;
+    }
+
+    pub(crate) fn client_update_for_wait_finished(
+        &mut self,
+        server_finished_slice: &[u8],
+        server_verify_data: &[u8]
+    )
+    {
+        // Take hash from session
+        if let Ok(sha256) = self.hash.get_sha256_clone() {
+            let hkdf = Hkdf::<Sha256>::from_prk(
+                self.server_traffic_secret.as_ref().unwrap()
+            ).unwrap();
+
+            // Compute finished_key
+            let mut okm: GenericArray::<u8, <Sha256 as Digest>::OutputSize> = 
+                Default::default();
+            hkdf_expand_label(&hkdf, "finished", "", &mut okm);
+
+            // Get transcript hash
+            let transcript_hash = sha256.finalize();
+
+            // Compute verify_data
+            // let computed_verify_data = Sha256::new()
+            //     .chain(&okm)
+            //     .chain(&transcript_hash)
+            //     .finalize();
+            let mut hmac = Hmac::<Sha256>::new_varkey(&okm).unwrap();
+            hmac.update(&transcript_hash);
+            log::info!("HMAC: {:?}", hmac);
+            log::info!("Received data: {:?}", server_verify_data);
+            hmac.verify(server_verify_data).unwrap();
+
+        } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+            let hkdf = Hkdf::<Sha384>::from_prk(
+                self.server_traffic_secret.as_ref().unwrap()
+            ).unwrap();
+
+            // Compute finished_key
+            let mut okm: GenericArray::<u8, <Sha384 as Digest>::OutputSize> =
+                Default::default();
+            hkdf_expand_label(&hkdf, "finished", "", &mut okm);
+
+            // Get transcript hash
+            let transcript_hash = sha384.finalize();
+
+            // Compute verify_data
+            // let computed_verify_data = Sha384::new()
+            //     .chain(&okm)
+            //     .chain(&transcript_hash)
+            //     .finalize();
+            // log::info!("Computed data: {:?}", computed_verify_data);
+            // log::info!("Received data: {:?}", server_verify_data);
+            // assert_eq!(computed_verify_data.as_slice(), server_verify_data);
+            let mut hmac = Hmac::<Sha384>::new_varkey(&okm).unwrap();
+            hmac.update(&transcript_hash);
+            log::info!("HMAC: {:?}", hmac);
+            log::info!("Received data: {:?}", server_verify_data);
+            hmac.verify(server_verify_data).unwrap();
+
+        } else {
+            unreachable!()
+        };
+
+        // Usual procedures: update hash
+        self.hash.update(server_finished_slice);
+
+        // At last, update client state
+        self.state = TlsState::SERVER_CONNECTED;
     }
 
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
@@ -586,19 +789,19 @@ impl Hash {
         }
     }
 
-    pub(crate) fn get_sha256_clone(&mut self) -> Sha256 {
+    pub(crate) fn get_sha256_clone(&mut self) -> Result<Sha256, ()> {
         if let Self::Sha256 { sha256 } = self {
-            sha256.clone()
+            Ok(sha256.clone())
         } else {
-            unreachable!()
+            Err(())
         }
     }
 
-    pub(crate) fn get_sha384_clone(&mut self) -> Sha384 {
+    pub(crate) fn get_sha384_clone(&mut self) -> Result<Sha384, ()> {
         if let Self::Sha384 { sha384 } = self {
-            sha384.clone()
+            Ok(sha384.clone())
         } else {
-            unreachable!()
+            Err(())
         }
     }
 }

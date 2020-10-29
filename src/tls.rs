@@ -54,6 +54,7 @@ pub(crate) enum TlsState {
     WAIT_CERT,
     WAIT_CV,
     WAIT_FINISHED,
+    SERVER_CONNECTED,   // Additional state, for client to send Finished after server Finished
     CONNECTED,
 }
 
@@ -65,7 +66,7 @@ pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
     session: RefCell<Session>,
 }
 
-impl<R: RngCore + CryptoRng> TlsSocket<R> {
+impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
     pub fn new<'a, 'b, 'c>(
         sockets: &mut SocketSet<'a, 'b, 'c>,
         rx_buffer: TcpSocketBuffer<'b>,
@@ -173,6 +174,14 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
             // TLS Client wait for server's certificate cerify
             // No need to send anything
             TlsState::WAIT_CV => {},
+
+            // Last step of server authentication
+            // TLS Client wait for server's Finished handshake
+            // No need to send anything
+            TlsState::WAIT_FINISHED => {}
+
+            // Send client Finished to end handshake
+            TlsState::SERVER_CONNECTED => {}
 
             _ => todo!()
         }
@@ -380,7 +389,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                 // Practically, nothing will be done about cookies/server name
                 // Extension processing is therefore skipped
                 // Update hash of the session, get EE by taking appropriate length of data
-                
+                // Length of handshake header is 4
                 let (handshake_slice, ee_slice) = 
                     take::<_, _, (&[u8], ErrorKind)>(
                         might_be_ee.length + 4
@@ -440,12 +449,12 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
                 // TODO: Process Certificate
                 let cert = might_be_cert.get_asn1_der_certificate().unwrap();
-                log::info!("Certificate Acquisition");
-                log::info!("Validation {:?}",
+                log::info!("Certificate validation {:?}",
                     validate_root_certificate(cert)
                 );
 
                 // Update session TLS state to WAIT_CV
+                // Length of handshake header is 4
                 let (handshake_slice, cert_slice) = 
                     take::<_, _, (&[u8], ErrorKind)>(
                         might_be_cert.length + 4
@@ -457,8 +466,6 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                         &cert_slice,
                         cert.return_rsa_public_key().unwrap()
                     );
-
-
             },
 
             // In this stage, server will eventually send a CertificateVerify
@@ -471,9 +478,7 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
                 }
 
                 // Pull out the `payload` from TlsRepr, decrypt as CV
-                // Keep 1 copy to update hash
                 let mut payload = repr.payload.take().unwrap();
-                let cert_slice = payload.clone();
 
                 // Instantiate associated data and decrypt
                 let mut array: [u8; 5] = [0; 5];
@@ -491,10 +496,86 @@ impl<R: RngCore + CryptoRng> TlsSocket<R> {
 
                 // Parse the certificate from TLS payload
                 let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, mut handshake_vec) = parse_result
+                let (_, (handshake_slice, mut handshake_vec)) = parse_result
                     .map_err(|_| Error::Unrecognized)?;
 
-                // Get hash from session, validate signature
+                // Ensure that it is CertificateVerify
+                let might_be_cert_verify = handshake_vec.remove(0);
+                if might_be_cert_verify.get_msg_type() != HandshakeType::CertificateVerify {
+                    // Process the other handshakes in "handshake_vec"
+                    todo!()
+                }
+
+                // Take out the portion for CertificateVerify
+                // Length of handshake header is 4
+                let (handshake_slice, cert_verify_slice) = 
+                    take::<_, _, (&[u8], ErrorKind)>(
+                        might_be_cert_verify.length + 4
+                    )(handshake_slice)
+                        .map_err(|_| Error::Unrecognized)?;
+
+                // Perform verification, update TLS state if successful
+                let (sig_alg, signature) = might_be_cert_verify.get_signature().unwrap();
+                self.session.borrow_mut()
+                    .client_update_for_wait_cv(
+                        cert_verify_slice,
+                        sig_alg,
+                        signature
+                    );
+            },
+
+            // Client will receive a Finished handshake from server
+            TlsState::WAIT_FINISHED => {
+                // Finished is disguised as Application Data
+                if !repr.is_application_data() {
+                    // Abort communication, this affect IV calculation
+                    todo!()
+                }
+
+                // Pull out the `payload` from TlsRepr, decrypt as Finished
+                let mut payload = repr.payload.take().unwrap();
+
+                // Instantiate associated data and decrypt
+                let mut array: [u8; 5] = [0; 5];
+                let mut buffer = TlsBuffer::new(&mut array);
+                buffer.write_u8(repr.content_type.into())?;
+                buffer.write_u16(repr.version.into())?;
+                buffer.write_u16(repr.length)?;
+                let associated_data: &[u8] = buffer.into();
+                {
+                    self.session.borrow_mut().decrypt_in_place(
+                        associated_data,
+                        &mut payload
+                    );
+                }
+                log::info!("decrypted wait_fin payload: {:?}", payload);
+
+                // Parse the TLS inner ciphertext as a Finished handshake
+                let parse_result = parse_inner_plaintext_for_handshake(&payload);
+                let (_, (handshake_slice, mut handshake_vec)) = parse_result
+                    .map_err(|_| Error::Unrecognized)?;
+
+                // Ensure that it is Finished
+                let might_be_server_finished = handshake_vec.remove(0);
+                if might_be_server_finished.get_msg_type() != HandshakeType::Finished {
+                    // Process the other handshakes in "handshake_vec"
+                    todo!()
+                }
+
+                // Take out the portion for server Finished
+                // Length of handshake header is 4
+                let (handshake_slice, server_finished_slice) = 
+                    take::<_, _, (&[u8], ErrorKind)>(
+                        might_be_server_finished.length + 4
+                    )(handshake_slice)
+                        .map_err(|_| Error::Unrecognized)?;
+                
+                // Perform verification, update TLS state if successful
+                self.session.borrow_mut()
+                    .client_update_for_wait_finished(
+                        server_finished_slice,
+                        might_be_server_finished.get_verify_data().unwrap()
+                    );
             }
 
             _ => {},

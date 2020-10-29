@@ -114,10 +114,6 @@ impl<'a> TlsRepr<'a> {
         self.handshake.is_none() &&
         self.payload.is_some()
     }
-
-    pub(crate) fn decrypt_ee(&self, shared_secret: &SharedSecret) -> HandshakeRepr {
-        todo!()
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -177,6 +173,32 @@ impl<'a, 'b> HandshakeRepr<'a> {
             Err(())
         }
     }
+
+    pub(crate) fn get_signature(&self) -> Result<(SignatureScheme, &[u8]), ()> {
+        if self.msg_type != HandshakeType::CertificateVerify {
+            return Err(())
+        };
+        if let HandshakeData::CertificateVerify(
+            cert_verify
+        ) = &self.handshake_data {
+            Ok((cert_verify.algorithm, cert_verify.signature))
+        } else {
+            Err(())
+        }
+    }
+
+    pub(crate) fn get_verify_data(self) -> Result<&'a [u8], ()> {
+        if self.msg_type != HandshakeType::Finished {
+            return Err(())
+        };
+        if let HandshakeData::Finished(
+            fin
+        ) = &self.handshake_data {
+            Ok(fin.verify_data)
+        } else {
+            Err(())
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -212,6 +234,8 @@ pub(crate) enum HandshakeData<'a> {
     EncryptedExtensions(EncryptedExtensions),
     Certificate(Certificate<'a>),
     CertificateVerify(CertificateVerify<'a>),
+    FinishedNeedParse,
+    Finished(Finished<'a>),
 }
 
 impl<'a> HandshakeData<'a> {
@@ -730,4 +754,9 @@ pub(crate) struct CertificateVerify<'a> {
     pub(crate) algorithm: SignatureScheme,
     pub(crate) signature_length: u16,
     pub(crate) signature: &'a [u8],
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Finished<'a> {
+    pub(crate) verify_data: &'a [u8]
 }

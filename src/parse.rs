@@ -177,6 +177,21 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
 
                 Ok((rest, repr))
             },
+            Finished => {
+                // Parse Finished, the size is determined
+                // Pre-split the slice and then parse for Finished
+                // i.e. check for completeness
+                let (rest, possible_verify_data) = take(repr.length)(rest)?;
+                let (_, handshake_data) = complete(
+                    parse_finished
+                )(possible_verify_data)?;
+
+                repr.handshake_data = HandshakeData::Finished(
+                    handshake_data
+                );
+
+                Ok((rest, repr))
+            }
             _ => todo!()
         }
     }
@@ -381,22 +396,34 @@ fn parse_certificate_verify(bytes: &[u8]) -> IResult<&[u8], CertificateVerify> {
         signature_length
     ))(bytes)?;
 
+    log::info!("Sig scheme: {:?}, sig:len: {:?}, rest_len: {:?}",
+        signature_scheme,
+        signature_length,
+        rest.len()
+    );
+
     let signature_scheme = SignatureScheme::try_from(
         NetworkEndian::read_u16(signature_scheme)
     ).unwrap();
     let signature_length = NetworkEndian::read_u16(signature_length);
 
-    let (_, signature) = complete(
-        take(signature_length)
-    )(rest)?;
+    // Take the signature portion out
+    let (rest, signature) = take(signature_length)(rest)?;
 
     Ok((
-        &[],
+        rest,
         CertificateVerify {
             algorithm: signature_scheme,
             signature_length,
             signature
         }
+    ))
+}
+
+fn parse_finished(bytes: &[u8]) -> IResult<&[u8], Finished> {
+    Ok((
+        &[],
+        Finished { verify_data: bytes }
     ))
 }
 

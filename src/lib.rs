@@ -9,6 +9,7 @@ pub mod buffer;
 pub mod key;
 pub mod session;
 pub mod certificate;
+pub mod fake_rng;
 
 use nom::error::ParseError;
 
