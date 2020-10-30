@@ -36,6 +36,7 @@ use nom::error::make_error;
 use nom::error::ErrorKind;
 
 use alloc::vec::{ self, Vec };
+use heapless::Vec as HeaplessVec;
 
 use crate::Error as TlsError;
 use crate::tls_packet::*;
@@ -181,7 +182,25 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             TlsState::WAIT_FINISHED => {}
 
             // Send client Finished to end handshake
-            TlsState::SERVER_CONNECTED => {}
+            TlsState::SERVER_CONNECTED => {
+                let mut inner_plaintext: HeaplessVec<u8, U64> = {
+                    let verify_data = self.session.borrow()
+                        .get_client_finished_verify_data();
+                    let mut handshake_header: [u8; 4] = [20, 0, 0, 0];
+                    NetworkEndian::write_u24(
+                        &mut handshake_header[1..4],
+                        u32::try_from(verify_data.len()).unwrap()
+                    );
+                    let mut buffer = HeaplessVec::from_slice(&handshake_header).unwrap();
+                    buffer.extend_from_slice(&verify_data).unwrap();
+                    // Inner plaintext: record type
+                    buffer.push(22).unwrap();
+                    buffer
+                };
+                self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
+                self.session.borrow_mut()
+                    .client_update_for_server_connected(&inner_plaintext);
+            }
 
             _ => todo!()
         }
@@ -571,11 +590,13 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         .map_err(|_| Error::Unrecognized)?;
                 
                 // Perform verification, update TLS state if successful
+                // Update traffic secret, reset sequence number
                 self.session.borrow_mut()
                     .client_update_for_wait_finished(
                         server_finished_slice,
                         might_be_server_finished.get_verify_data().unwrap()
                     );
+                log::info!("Computed secret");
             }
 
             _ => {},
@@ -583,7 +604,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
         // A TLS Record was received and processed and verified
         // Increment sequence number
-        self.session.borrow_mut().increment_sequence_number();
+        self.session.borrow_mut().increment_server_sequence_number();
 
         Ok(())
     }
@@ -609,7 +630,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                     Err(Error::Truncated)
                 }
             )?;
-        self.session.borrow_mut().increment_sequence_number();
+        self.session.borrow_mut().increment_client_sequence_number();
         Ok(())
     }
 
@@ -631,7 +652,53 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                     Err(Error::Truncated)
                 }
             )?;
-        self.session.borrow_mut().increment_sequence_number();
+        self.session.borrow_mut().increment_client_sequence_number();
+        Ok(())
+    }
+
+    // Send method for TLS Handshake that needs to be encrypted.
+    // Does the following things:
+    // 1. Encryption
+    // 2. Add TLS header in front of application data
+    // Input should be inner plaintext
+    // Note: Do not put this slice into the transcript hash. It is polluted.
+    fn send_application_slice(&self, sockets: &mut SocketSet, slice: &mut [u8]) -> Result<()> {
+        let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+        if !tcp_socket.can_send() {
+            return Err(Error::Illegal);
+        }
+
+        log::info!("Delivered slice: {:?}", slice);
+
+        // Borrow session in advance
+        let mut client_session = self.session.borrow_mut();
+
+        // Pre-compute TLS record layer as associated_data
+        let mut associated_data: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x00];
+        let auth_tag_length: u16 = match client_session.get_cipher_suite_type() {
+            Some(CipherSuite::TLS_AES_128_GCM_SHA256) |
+            Some(CipherSuite::TLS_AES_256_GCM_SHA384) |
+            Some(CipherSuite::TLS_AES_128_CCM_SHA256) |
+            Some(CipherSuite::TLS_CHACHA20_POLY1305_SHA256) => {
+                16
+            },
+            _ => return Err(Error::Illegal),
+        };
+        NetworkEndian::write_u16(
+            &mut associated_data[3..5],
+            auth_tag_length + u16::try_from(slice.len()).unwrap()
+        );
+
+        let auth_tag = client_session.encrypt_in_place_detached(
+            &associated_data,
+            slice
+        ).map_err(|_| Error::Illegal)?;
+
+        tcp_socket.send_slice(&associated_data)?;
+        tcp_socket.send_slice(&slice)?;
+        tcp_socket.send_slice(&auth_tag)?;
+
+        client_session.increment_client_sequence_number();
         Ok(())
     }
 

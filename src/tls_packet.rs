@@ -80,6 +80,14 @@ impl<'a> TlsRepr<'a> {
         self
     }
 
+    pub(crate) fn change_cipher_spec(mut self) -> Self {
+        self.content_type = TlsContentType::ChangeCipherSpec;
+        self.version = TlsVersion::Tls12;
+        self.length = 1;
+        self.payload = Some((&[1]).to_vec());
+        self
+    }
+
     // TODO: Consider replace all these boolean function
     // into a single function that returns the HandshakeType.
     pub(crate) fn is_server_hello(&self) -> bool {
