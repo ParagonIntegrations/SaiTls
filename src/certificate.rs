@@ -1,7 +1,6 @@
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 
-use crate::parse::parse_asn1_der_object;
 use crate::parse::parse_asn1_der_rsa_public_key;
 use crate::Error as TlsError;
 
@@ -32,6 +31,7 @@ pub struct TBSCertificate<'a> {
     pub extensions: Extensions<'a>,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Version {
@@ -147,7 +147,6 @@ pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
             let mut hasher = Sha1::new();
             hasher.update(cert.tbs_certificate_encoded);
 
-            // TODO: invoke method to get public key
             let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
                 cert.tbs_certificate.subject_public_key_info.subject_public_key
             ).map_err(|_| TlsError::ParsingError)?;
@@ -164,9 +163,6 @@ pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
                 cert.signature_value
             );
             Ok(verify_result.is_ok())
-        }
-        _ => {
-            todo!()
         }
     }
 }

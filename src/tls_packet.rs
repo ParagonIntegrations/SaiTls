@@ -1,11 +1,7 @@
-use byteorder::{ByteOrder, NetworkEndian, BigEndian};
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 
-use rand_core::RngCore;
-use rand_core::CryptoRng;
-
-use p256::{EncodedPoint, AffinePoint, ecdh::{EphemeralSecret, SharedSecret}};
+use p256::{EncodedPoint, ecdh::EphemeralSecret};
 
 use core::convert::TryFrom;
 use core::convert::TryInto;
@@ -242,7 +238,6 @@ pub(crate) enum HandshakeData<'a> {
     EncryptedExtensions(EncryptedExtensions),
     Certificate(Certificate<'a>),
     CertificateVerify(CertificateVerify<'a>),
-    FinishedNeedParse,
     Finished(Finished<'a>),
 }
 
@@ -250,7 +245,7 @@ impl<'a> HandshakeData<'a> {
     pub(crate) fn get_length(&self) -> usize {
         match self {
             HandshakeData::ClientHello(data) => data.get_length(),
-            HandshakeData::ServerHello(data) => todo!(),
+            HandshakeData::ServerHello(_data) => todo!(),
             _ => 0,
         }
     }
@@ -288,7 +283,7 @@ impl<'a> ClientHello<'a> {
         let mut versions = Vec::new();
         versions.push(TlsVersion::Tls13);
 
-        let mut content = SupportedVersions::ClientHello {
+        let content = SupportedVersions::ClientHello {
             length,
             versions,
         };
@@ -308,7 +303,7 @@ impl<'a> ClientHello<'a> {
     pub(crate) fn add_sh_supported_versions(mut self) -> Self {
         let selected_version = TlsVersion::Tls13;
 
-        let mut content = SupportedVersions::ServerHello {
+        let content = SupportedVersions::ServerHello {
             selected_version
         };
 
@@ -570,6 +565,7 @@ pub(crate) struct Cookie {
     cookie: Vec<u8>,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 pub(crate) enum SignatureScheme {
@@ -610,6 +606,7 @@ impl SignatureSchemeList {
     }
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 pub(crate) enum NamedGroup {
@@ -680,6 +677,7 @@ impl KeyShareEntryContent {
     }
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 #[repr(u16)]
 pub(crate) enum NameType {

@@ -1,8 +1,8 @@
 use hkdf::Hkdf;
-use sha2::{ Digest, Sha256, Sha384, Sha512 };
+use sha2::Digest;
 use sha2::digest::{BlockInput, FixedOutput, Reset, Update};
 use generic_array::{ GenericArray, ArrayLength };
-use heapless::{ String, Vec, consts::* };
+use heapless::{ String, consts::* };
 
 use crate::buffer::TlsBuffer;
 

@@ -6,12 +6,9 @@ use nom::combinator::complete;
 use nom::combinator::opt;
 use nom::sequence::preceded;
 use nom::sequence::tuple;
-use nom::error::make_error;
 use nom::error::ErrorKind;
-use smoltcp::Error;
-use smoltcp::Result;
 
-use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use byteorder::{ByteOrder, NetworkEndian};
 
 use crate::tls_packet::*;
 
@@ -83,7 +80,7 @@ pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8]
     let mut remaining_bytes = bytes;
     let mut handshake_vec: Vec<HandshakeRepr> = Vec::new();
     
-    while true {
+    loop {
         // Perform check on the number of remaining bytes
         // Case 1: At most 4 bytes left, then that must be the content type of the TLS record
         //         Assert that it is indeed handshake (0x16)
@@ -115,8 +112,6 @@ pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8]
         remaining_bytes = rem;
         handshake_vec.push(handshake_repr);
     }
-
-    unreachable!()
 }
 
 // Input: The entire inner plaintext including TLS record
@@ -281,7 +276,7 @@ fn parse_server_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
 // } TLSInnerPlaintext;
 
 fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtensions> {
-    let (mut rest, extension_length) = take(2_usize)(bytes)?;
+    let (rest, extension_length) = take(2_usize)(bytes)?;
     let extension_length: u16 = NetworkEndian::read_u16(extension_length);
 	let mut extension_length_counter: i32 = extension_length.into();
     let mut extension_vec: Vec<Extension> = Vec::new();

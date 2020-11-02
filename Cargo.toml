@@ -45,6 +45,11 @@ version = "0.5.0"
 default-features = false
 features = [ "ecdh", "ecdsa", "arithmetic" ]
 
+[dependencies.ed25519-dalek]
+version = "1.0.1"
+default-features = false
+features = [ "u64_backend" ]
+
 # Fetch from master, for "no_std" + "alloc" combination
 [dependencies.rsa]
 git = "https://github.com/RustCrypto/RSA.git"
@@ -55,6 +60,11 @@ features = [ "alloc" ]
 version = "5.1.2"
 default-features = false
 features = []
+
+[dependencies.arraydeque]
+version = "0.4.5"
+default-features = false
+features = [ "use_generic_array" ]
 
 [dependencies.simple_logger]
 version = "1.11.0"

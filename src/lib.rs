@@ -11,8 +11,6 @@ pub mod session;
 pub mod certificate;
 pub mod fake_rng;
 
-use nom::error::ParseError;
-
 // TODO: Implement errors
 // Details: Encapsulate smoltcp & nom errors
 #[derive(Debug, Clone)]

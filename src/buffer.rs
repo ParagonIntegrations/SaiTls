@@ -1,11 +1,10 @@
 use core::cell::RefCell;
-use core::convert::{ TryInto, TryFrom };
 
 use smoltcp::{ Result, Error };
 
 use alloc::vec::Vec;
 
-use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use byteorder::{ByteOrder, NetworkEndian};
 
 use crate::tls_packet::*;
 use crate::key::*;
@@ -181,7 +180,7 @@ impl<'a> TlsBuffer<'a> {
                 }
             },
             KeyShareEntry(k) => {
-                let mut key_share_entry_into = |buffer: &mut TlsBuffer, entry: crate::tls_packet::KeyShareEntry| {
+                let key_share_entry_into = |buffer: &mut TlsBuffer, entry: crate::tls_packet::KeyShareEntry| {
                     buffer.write_u16(entry.group.into())?;
                     buffer.write_u16(entry.length)?;
                     buffer.write(entry.key_exchange.as_slice())

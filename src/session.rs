@@ -7,14 +7,9 @@ use chacha20poly1305::ChaCha20Poly1305;
 use ccm::Ccm;
 use hkdf::Hkdf;
 use generic_array::GenericArray;
-use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use byteorder::{ByteOrder, NetworkEndian};
 use rsa::{RSAPublicKey, PublicKey, PaddingScheme, Hash as RSAHash};
 use hmac::{ Hmac, Mac, NewMac };
-
-use rand_core::RngCore;
-
-use core::convert::AsRef;
-use core::cell::RefCell;
 
 use crate::tls::TlsState;
 use crate::tls_packet::CipherSuite;
@@ -505,9 +500,12 @@ impl Session {
 
         // Handle Ed25519 and p256 separately
         // These 2 algorithms have a mandated hash function
-        if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256 ||
-            signature_algorithm == SignatureScheme::ed25519
+        if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256
         {
+            todo!()
+        }
+
+        if signature_algorithm == SignatureScheme::ed25519 {
             todo!()
         }
 

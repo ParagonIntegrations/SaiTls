@@ -1,12 +1,8 @@
 use smoltcp::socket::TcpSocket;
 use smoltcp::socket::TcpState;
-use smoltcp::socket::Socket;
-use smoltcp::socket::AnySocket;
-use smoltcp::socket::SocketRef;
 use smoltcp::socket::SocketHandle;
 use smoltcp::socket::SocketSet;
 use smoltcp::socket::TcpSocketBuffer;
-use smoltcp::wire::Ipv4Address;
 use smoltcp::wire::IpEndpoint;
 use smoltcp::Result;
 use smoltcp::Error;
@@ -14,35 +10,26 @@ use smoltcp::iface::EthernetInterface;
 use smoltcp::time::Instant;
 use smoltcp::phy::Device;
 
-use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use byteorder::{ByteOrder, NetworkEndian};
 use generic_array::GenericArray;
 
-use core::convert::TryInto;
 use core::convert::TryFrom;
 use core::cell::RefCell;
 
 use rand_core::{RngCore, CryptoRng};
-use p256::{EncodedPoint, AffinePoint, ecdh::EphemeralSecret, ecdh::SharedSecret};
-use aes_gcm::{Aes128Gcm, Aes256Gcm};
-use chacha20poly1305::{ChaCha20Poly1305, Key};
-use ccm::{Ccm, consts::*};
-use aes_gcm::aes::Aes128;
-use aes_gcm::{AeadInPlace, NewAead};
-use sha2::{Sha256, Sha384, Sha512, Digest};
+use p256::{EncodedPoint, ecdh::EphemeralSecret};
+use ccm::consts::*;
+use aes_gcm::AeadInPlace;
 
 use nom::bytes::complete::take;
-use nom::IResult;
-use nom::error::make_error;
 use nom::error::ErrorKind;
 
-use alloc::vec::{ self, Vec };
+use alloc::vec::Vec;
 use heapless::Vec as HeaplessVec;
 
-use crate::Error as TlsError;
 use crate::tls_packet::*;
 use crate::parse::{
     parse_tls_repr,
-    parse_handshake,
     parse_inner_plaintext_for_handshake,
     get_content_type_inner_plaintext
 };
@@ -188,7 +175,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
             // Send client Finished to end handshake
             TlsState::SERVER_CONNECTED => {
-                let mut inner_plaintext: HeaplessVec<u8, U64> = {
+                let inner_plaintext: HeaplessVec<u8, U64> = {
                     let verify_data = self.session.borrow()
                         .get_client_finished_verify_data();
                     let mut handshake_header: [u8; 4] = [20, 0, 0, 0];
@@ -214,13 +201,14 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         iface.poll(sockets, now);
 
         // Read for TLS packet
+        // Proposition: Decouple all data from TLS record layer before processing
         let mut array: [u8; 2048] = [0; 2048];
         let mut tls_repr_vec = self.recv_tls_repr(sockets, &mut array)?;
 
         // Take the TLS representation out of the vector,
         // Process as a queue
         let tls_repr_vec_size = tls_repr_vec.len();
-        for index in 0..tls_repr_vec_size {
+        for _index in 0..tls_repr_vec_size {
             let repr = tls_repr_vec.remove(0);
             self.process(repr)?;
         }
@@ -398,7 +386,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 }
 
                 let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, (mut handshake_slice, mut handshake_vec)) = 
+                let (_, (handshake_slice, mut handshake_vec)) = 
                     parse_result.map_err(|_| Error::Unrecognized)?;
 
                 // Verify that it is indeed an EE
@@ -414,7 +402,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 // Extension processing is therefore skipped
                 // Update hash of the session, get EE by taking appropriate length of data
                 // Length of handshake header is 4
-                let (handshake_slice, ee_slice) = 
+                let (_handshake_slice, ee_slice) = 
                     take::<_, _, (&[u8], ErrorKind)>(
                         might_be_ee.length + 4
                     )(handshake_slice)
@@ -483,7 +471,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
                 // Update session TLS state to WAIT_CV
                 // Length of handshake header is 4
-                let (handshake_slice, cert_slice) = 
+                let (_handshake_slice, cert_slice) = 
                     take::<_, _, (&[u8], ErrorKind)>(
                         might_be_cert.length + 4
                     )(handshake_slice)
@@ -536,7 +524,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
                 // Take out the portion for CertificateVerify
                 // Length of handshake header is 4
-                let (handshake_slice, cert_verify_slice) = 
+                let (_handshake_slice, cert_verify_slice) = 
                     take::<_, _, (&[u8], ErrorKind)>(
                         might_be_cert_verify.length + 4
                     )(handshake_slice)
@@ -714,7 +702,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
     fn recv_tls_repr<'a>(&'a self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec::<TlsRepr>> {
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
         if !tcp_socket.can_recv() {
-            return Ok((Vec::new()));
+            return Ok(Vec::new());
         }
         let array_size = tcp_socket.recv_slice(byte_array)?;
         let mut vec: Vec<TlsRepr> = Vec::new();
