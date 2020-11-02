@@ -119,6 +119,32 @@ pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8]
     unreachable!()
 }
 
+// Input: The entire inner plaintext including TLS record
+// (record | content | content_type | zeros)
+// Get the content_type of inner_plaintext
+// Also get the (optional) starting index of zero paddings
+pub(crate) fn get_content_type_inner_plaintext(inner_plaintext: &[u8]) -> (TlsContentType, Option<usize>) {
+    // Approach from the rear, discard zeros until a nonzero byte is found
+    let mut zero_padding_start_index = inner_plaintext.len();
+    while (&inner_plaintext[..zero_padding_start_index]).ends_with(&[0x00]) {
+        // Record wrapper takes the first 5 byte
+        // Worst case scenario there must be a content type
+        if zero_padding_start_index > 6 {
+            zero_padding_start_index -= 1;
+        } else {
+            return (TlsContentType::Invalid, None);
+        }
+    }
+    (
+        TlsContentType::try_from(inner_plaintext[zero_padding_start_index-1]).unwrap(),
+        if zero_padding_start_index < inner_plaintext.len() {
+            Some(zero_padding_start_index)
+        } else {
+            None
+        }
+    )
+}
+
 // TODO: Redo EE
 // Not very appropriate to classify EE as proper handshake
 // It may include multiple handshakes
@@ -395,12 +421,6 @@ fn parse_certificate_verify(bytes: &[u8]) -> IResult<&[u8], CertificateVerify> {
         signature_scheme,
         signature_length
     ))(bytes)?;
-
-    log::info!("Sig scheme: {:?}, sig:len: {:?}, rest_len: {:?}",
-        signature_scheme,
-        signature_length,
-        rest.len()
-    );
 
     let signature_scheme = SignatureScheme::try_from(
         NetworkEndian::read_u16(signature_scheme)

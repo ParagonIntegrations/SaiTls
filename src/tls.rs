@@ -40,7 +40,12 @@ use heapless::Vec as HeaplessVec;
 
 use crate::Error as TlsError;
 use crate::tls_packet::*;
-use crate::parse::{ parse_tls_repr, parse_handshake, parse_inner_plaintext_for_handshake };
+use crate::parse::{
+    parse_tls_repr,
+    parse_handshake,
+    parse_inner_plaintext_for_handshake,
+    get_content_type_inner_plaintext
+};
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
 use crate::certificate::validate_root_certificate;
@@ -468,9 +473,13 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
                 // TODO: Process Certificate
                 let cert = might_be_cert.get_asn1_der_certificate().unwrap();
-                log::info!("Certificate validation {:?}",
-                    validate_root_certificate(cert)
-                );
+
+                // TODO: Replace this block after implementing a proper 
+                // certificate verification procdeure
+                match validate_root_certificate(cert) {
+                    Ok(true) => {},
+                    _ => panic!("Certificate does not match")
+                }
 
                 // Update session TLS state to WAIT_CV
                 // Length of handshake header is 4
@@ -567,7 +576,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         &mut payload
                     );
                 }
-                log::info!("decrypted wait_fin payload: {:?}", payload);
 
                 // Parse the TLS inner ciphertext as a Finished handshake
                 let parse_result = parse_inner_plaintext_for_handshake(&payload);
@@ -596,7 +604,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         server_finished_slice,
                         might_be_server_finished.get_verify_data().unwrap()
                     );
-                log::info!("Computed secret");
             }
 
             _ => {},
@@ -662,13 +669,12 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
     // 2. Add TLS header in front of application data
     // Input should be inner plaintext
     // Note: Do not put this slice into the transcript hash. It is polluted.
+    // TODO: Rename this function. It is only good for client finished
     fn send_application_slice(&self, sockets: &mut SocketSet, slice: &mut [u8]) -> Result<()> {
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
         if !tcp_socket.can_send() {
             return Err(Error::Illegal);
         }
-
-        log::info!("Delivered slice: {:?}", slice);
 
         // Borrow session in advance
         let mut client_session = self.session.borrow_mut();
@@ -726,5 +732,104 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 _ => return Err(Error::Unrecognized),
             };
         }
+    }
+
+    pub fn recv_slice(&self, sockets: &mut SocketSet, data: &mut [u8]) -> Result<usize> {
+        let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+        if !tcp_socket.can_recv() {
+            return Ok(0);
+        }
+
+        let recv_slice_size = tcp_socket.recv_slice(data)?;
+        // Encrypted data need a TLS record wrapper (5 bytes)
+        // Authentication tag (16 bytes, for all supported AEADs)
+        // Content type byte (1 byte)
+        // Zero paddings (>=0 bytes)
+        if recv_slice_size < 22 {
+            return Ok(0);
+        }
+        
+        // Get Associated Data
+        let mut session = self.session.borrow_mut();
+        let mut associated_data: [u8; 5] = [0; 5];
+        associated_data.clone_from_slice(&data[..5]);
+        log::info!("Received encrypted appdata: {:?}", &data[..recv_slice_size]);
+
+        // Dump association data (TLS Record wrapper)
+        // Only decrypt application data
+        // Always increment sequence number after decrpytion
+        session.decrypt_application_data_in_place(
+            &associated_data,
+            &mut data[5..recv_slice_size]
+        ).unwrap();
+        session.increment_server_sequence_number();
+
+        // Make sure it is application data
+        let (content_type, padding_start_index) =
+            get_content_type_inner_plaintext(&data[..(recv_slice_size-16)]);
+
+        // If it is not application data, handle it internally
+        if content_type != TlsContentType::ApplicationData {
+            // TODO:: Implement key update
+            log::info!("Other decrypted: {:?}", &data[..(recv_slice_size-16)]);
+            return Ok(0);
+        }
+
+        // Otherwise, it is surely application data.
+        // Prune TLS record wrapper (5 bytes) from data.
+        data.rotate_left(5);
+        
+        // Remove extra length:
+        // 5 bytes of TLS record header
+        // 16 bytes of authentication tag (included in zero padding search fn)
+        // 1 byte of content type
+        // zero paddings, variated length
+        let actual_application_data_length = recv_slice_size - 5 - 1
+            - padding_start_index.map_or(16,
+                |start| recv_slice_size - start
+            );
+
+        Ok(actual_application_data_length)
+    }
+
+    pub fn send_slice(&self, sockets: &mut SocketSet, data: &[u8]) -> Result<()> {
+        // Sending order:
+        // 1. Associated data/ TLS Record layer
+        // 2. Encrypted { Payload (data) | Content type: Application Data }
+        // 3. Authentication tag (16 bytes for all supported AEADs)
+        let mut associated_data: [u8; 5] = [
+            0x17,           // Application data
+            0x03, 0x03,     // TLS 1.3 record disguised as TLS 1.2
+            0x00, 0x00      // Length of encrypted data, yet to be determined
+        ];
+
+        NetworkEndian::write_u16(&mut associated_data[3..5],
+            u16::try_from(data.len()).unwrap()  // Payload length
+            + 1                                 // Content type length
+            + 16                                // Auth tag length
+        );
+
+        // TODO: Dynamically size typed Heapless Vec on socket instantiation,
+        // just like MiniMQ
+        let mut vec: HeaplessVec<u8, U1024> = HeaplessVec::from_slice(data).unwrap();
+        vec.push(0x17);     // Content type
+        
+        let mut session = self.session.borrow_mut();
+        let tag = session.encrypt_application_data_in_place_detached(
+            &associated_data,
+            &mut vec
+        ).unwrap();
+        session.increment_client_sequence_number();
+
+        let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+        if !tcp_socket.can_send() {
+            return Err(Error::Illegal);
+        }
+
+        tcp_socket.send_slice(&associated_data)?;
+        tcp_socket.send_slice(&vec)?;
+        tcp_socket.send_slice(&tag)?;
+
+        Ok(())
     }
 }

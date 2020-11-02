@@ -163,7 +163,6 @@ pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
                 &hasher.finalize(),
                 cert.signature_value
             );
-            log::info!("Verification result: {:?}", verify_result);
             Ok(verify_result.is_ok())
         }
         _ => {

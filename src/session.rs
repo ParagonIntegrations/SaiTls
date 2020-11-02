@@ -550,7 +550,6 @@ impl Session {
                 let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
                     padding, &verify_hash, signature
                 );
-                log::info!("Algorithm {:?} Certificate verify: {:?}", signature_algorithm, verify_result);
                 if verify_result.is_err() {
                     todo!()
                 }
@@ -954,6 +953,10 @@ impl Session {
         client_finished_slice: &[u8]
     )
     {
+        // Will change server & client key to application key,
+        // Reset sequence number
+        self.client_sequence_number = 0;
+        self.server_sequence_number = 0;
         self.hash.update(client_finished_slice);
         self.state = TlsState::CONNECTED;
     }
@@ -1024,6 +1027,38 @@ impl Session {
         self.client_handshake_cipher.as_ref().map(|cipher| cipher.get_cipher_suite_type())
     }
 
+    // TODO: Merge decryption methods
+    pub(crate) fn encrypt_application_data_in_place_detached(
+        &self,
+        associated_data: &[u8],
+        buffer: &mut [u8]
+    ) -> Result<GenericArray<u8, U16>, Error> {
+        let (seq_num, nonce, cipher): (u64, &Vec<u8, U12>, &Cipher) = match self.role {
+            TlsRole::Client => {(
+                self.client_sequence_number,
+                self.client_application_nonce.as_ref().unwrap(),
+                self.client_application_cipher.as_ref().unwrap()
+            )},
+            TlsRole::Server => {(
+                self.server_sequence_number,
+                self.server_application_nonce.as_ref().unwrap(),
+                self.server_application_cipher.as_ref().unwrap()
+            )},
+        };
+
+        // Calculate XOR'ed nonce
+        let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
+        let clipped_seq_num: u128 = seq_num.into();
+        let mut processed_nonce: [u8; 12] = [0; 12];
+        NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
+
+        cipher.encrypt_in_place_detached(
+            &GenericArray::from_slice(&processed_nonce),
+            associated_data,
+            buffer
+        )
+    }
+
     pub(crate) fn encrypt_in_place(
         &self,
         associated_data: &[u8],
@@ -1083,6 +1118,43 @@ impl Session {
             &GenericArray::from_slice(&processed_nonce),
             associated_data,
             buffer
+        )
+    }
+
+    // TODO: Merge decryption methods
+    // Take control of the entire decryption, manually invoke detached decryption
+    pub(crate) fn decrypt_application_data_in_place(
+        &self,
+        associated_data: &[u8],
+        buffer: &mut [u8],
+    ) -> Result<(), Error> {
+        let (seq_num, nonce, cipher): (u64, &Vec<u8, U12>, &Cipher) = match self.role {
+            TlsRole::Client => {(
+                self.server_sequence_number,
+                self.server_application_nonce.as_ref().unwrap(),
+                self.server_application_cipher.as_ref().unwrap()
+            )},
+            TlsRole::Server => {(
+                self.client_sequence_number,
+                self.client_application_nonce.as_ref().unwrap(),
+                self.client_application_cipher.as_ref().unwrap()
+            )},
+        };
+
+        // Calculate XOR'ed nonce
+        let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
+        let clipped_seq_num: u128 = seq_num.into();
+        let mut processed_nonce: [u8; 12] = [0; 12];
+        NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
+
+        let buffer_size = buffer.len();
+        let tag = GenericArray::clone_from_slice(&buffer[(buffer_size-16)..]);
+
+        cipher.decrypt_in_place_detached(
+            &GenericArray::from_slice(&processed_nonce),
+            associated_data,
+            &mut buffer[..(buffer_size-16)],
+            &tag
         )
     }
 
@@ -1279,6 +1351,37 @@ impl Cipher {
             },
             Cipher::Ccm { ccm } => {
                 ccm.decrypt_in_place(nonce, associated_data, buffer)
+            }
+        }.map_err(|_| Error::DecryptionError)
+    }
+
+    pub(crate) fn decrypt_in_place_detached(
+        &self,
+        nonce: &GenericArray<u8, U12>,
+        associated_data: &[u8],
+        buffer: &mut [u8],
+        tag: &GenericArray<u8, U16>
+    ) -> Result<(), Error> {
+        match self {
+            Cipher::Aes128Gcm { aes128gcm } => {
+                aes128gcm.decrypt_in_place_detached(
+                    nonce, associated_data, buffer, tag
+                )
+            },
+            Cipher::Aes256Gcm { aes256gcm } => {
+                aes256gcm.decrypt_in_place_detached(
+                    nonce, associated_data, buffer, tag
+                )
+            },
+            Cipher::Chacha20poly1305 { chacha20poly1305 } => {
+                chacha20poly1305.decrypt_in_place_detached(
+                    nonce, associated_data, buffer, tag
+                )
+            },
+            Cipher::Ccm { ccm } => {
+                ccm.decrypt_in_place_detached(
+                    nonce, associated_data, buffer, tag
+                )
             }
         }.map_err(|_| Error::DecryptionError)
     }
