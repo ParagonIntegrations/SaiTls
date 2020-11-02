@@ -237,12 +237,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         match tls_state {
             // During WAIT_SH for a TLS client, client should wait for ServerHello
             TlsState::WAIT_SH => {
-                // Legacy_protocol must be TLS 1.2
-                if repr.version != TlsVersion::Tls12 {
-                    // Abort communication
-                    todo!()
-                }
-
                 // TODO: Validate SH
                 if repr.is_server_hello() {
                     // Check SH content:
