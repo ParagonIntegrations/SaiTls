@@ -1,8 +1,11 @@
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 
+use generic_array::GenericArray;
+
 use crate::parse::parse_asn1_der_rsa_public_key;
 use crate::Error as TlsError;
+use crate::session::CertificatePublicKey;
 
 use sha1::{Sha1, Digest};
 use rsa::{PublicKey, RSAPublicKey, PaddingScheme, BigUint, Hash};
@@ -182,10 +185,112 @@ impl<'a> Certificate<'a> {
             BigUint::from_bytes_be(exponent)
         ).map_err(|_| ())
     }
+
+    // General return public key method
+    // TODO: Replace return_rsa_public_key() with this method
+    // Things to change: session.rs: client_update_for_wait_cert_cr
+    pub(crate) fn get_cert_public_key(&self) -> Result<CertificatePublicKey, ()> {
+        let public_key_info = &self.tbs_certificate.subject_public_key_info;
+        let algorithm_identifier = &public_key_info.algorithm;
+
+        // 3 possibilities: RSA_ENCRYPTION, ID_EC_PUBLIC_KEY, and EdDSA25519
+        match algorithm_identifier.algorithm {
+            oid::RSA_ENCRYPTION => {
+                let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
+                    self.tbs_certificate.subject_public_key_info.subject_public_key
+                ).map_err(|_| ())?;
+        
+                let public_key = RSAPublicKey::new(
+                    BigUint::from_bytes_be(modulus),
+                    BigUint::from_bytes_be(exponent)
+                ).map_err(|_| ())?;
+                Ok(
+                    CertificatePublicKey::RSA {
+                        cert_rsa_public_key: public_key
+                    }
+                )
+            },
+            oid::ID_EC_PUBLIC_KEY => {
+                // Check the type of EC, only support secp256r1
+                // Will definitely NOT support custom curve
+                if algorithm_identifier.parameters != oid::PRIME256V1 {
+                    return Err(());
+                }
+                let p256_verify_key = p256::ecdsa::VerifyKey::from_encoded_point(
+                    &p256::EncodedPoint::from_untagged_bytes(
+                        GenericArray::from_slice(
+                            &public_key_info.subject_public_key[1..]
+                        )
+                    )
+                ).map_err(|_| ())?;
+                Ok(
+                    CertificatePublicKey::ECDSA_SECP256R1_SHA256 {
+                        cert_verify_key: p256_verify_key
+                    }
+                )
+            },
+            oid::ID_EDDSA_25519 => {
+                let ed25519_public_key = ed25519_dalek::PublicKey::from_bytes(
+                    public_key_info.subject_public_key
+                ).map_err(|_| ())?;
+                Ok(
+                    CertificatePublicKey::ED25519 {
+                        cert_eddsa_key: ed25519_public_key
+                    }
+                )
+            },
+            _ => Err(())
+        }
+    }
 }
 
+// TODO: Centralize OID, another OID module can be found in `parse.rs`
 mod oid {
-    // ECDSA signature algorithms
-    pub const SHA1_WITH_RSA_ENCRYPTION: &'static [u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
+    // RSA public key
+    pub const RSA_ENCRYPTION: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
+        
+    // EC public key for secp256r1
+    pub const ID_EC_PUBLIC_KEY: &'static [u8] = 
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+    pub const PRIME256V1: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+
+    // EDDSA25519 public key, signature algorithm
+    pub const ID_EDDSA_25519: &'static [u8] =
+        &[0x2B, 0x65, 0x70];
+    
+    // Supported Signature Algorithm (RFC 4055, RFC 3279)
+    // PKCS #1 v1.5
+    pub const SHA1_WITH_RSA_ENCRYPTION: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
+    pub const SHA224_WITH_RSA_ENCRYPTION: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0E];
+    pub const SHA256_WITH_RSA_ENCRYPTION: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B];
+    pub const SHA384_WITH_RSA_ENCRYPTION: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C];
+    pub const SHA512_WITH_RSA_ENCRYPTION: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D];
+    
+    // RSASSA_PSS
+    pub const ID_RSASSA_PSS: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
+    
+    // RSAES_OAEP
+    pub const ID_RSAES_OAEP: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x07];
+
+    // ECDSA signature algorithms, from OID repo
+    pub const ECDSA_WITH_SHA1: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x01];
+    pub const ECDSA_WITH_SHA224: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x01];
+    pub const ECDSA_WITH_SHA256: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
+    pub const ECDSA_WITH_SHA384: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03];
+    pub const ECDSA_WITH_SHA512: &'static [u8] =
+        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04];
 }
 

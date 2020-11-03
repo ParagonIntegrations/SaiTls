@@ -57,12 +57,13 @@ pub(crate) struct Session {
     // Sequence number: Start from 0, 64 bits
     // Increment by one per record processed (read OR write)
     // Reset to 0 on rekey AND key exchange
-    // TODO: Force rekey if sequence number need to wrap
+    // TODO: Force rekey if sequence number need to wrap (very low priority)
     client_sequence_number: u64,
     server_sequence_number: u64,
     // Certificate public key
     // For Handling CertificateVerify
-    cert_rsa_public_key: Option<RSAPublicKey>,
+    cert_rsa_public_key: Option<RSAPublicKey>,      // TODO: Replace and remove
+    cert_public_key: Option<CertificatePublicKey>,
 }
 
 impl Session {
@@ -93,7 +94,8 @@ impl Session {
             server_application_nonce: None,
             client_sequence_number: 0,
             server_sequence_number: 0,
-            cert_rsa_public_key: None
+            cert_rsa_public_key: None,      // TODO: Remove over-specific public key
+            cert_public_key: None
         }
     }
 
@@ -500,8 +502,7 @@ impl Session {
 
         // Handle Ed25519 and p256 separately
         // These 2 algorithms have a mandated hash function
-        if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256
-        {
+        if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256 {
             todo!()
         }
 
@@ -1440,5 +1441,17 @@ impl Cipher {
                 CipherSuite::TLS_AES_128_CCM_SHA256
             }
         }
+    }
+}
+
+pub(crate) enum CertificatePublicKey {
+    RSA {
+        cert_rsa_public_key: RSAPublicKey
+    },
+    ECDSA_SECP256R1_SHA256 {
+        cert_verify_key: p256::ecdsa::VerifyKey
+    },
+    ED25519 {
+        cert_eddsa_key: ed25519_dalek::PublicKey
     }
 }

@@ -286,8 +286,8 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
     // Process TLS ingress during handshake
     // The slice should ONLY include handshake overhead
-    // i.e. No  5 bytes of TLS Record
-    //      YES 4 bytes of HandshakeRepr, everything within the same handshake
+    // i.e. Exclude 5 bytes of TLS Record
+    //      Include 4 bytes of HandshakeRepr, everything within the same handshake
     fn process(&self, handshake_slice: &[u8], mut repr: TlsRepr) -> Result<()> {
         // Change_cipher_spec check:
         // Must receive CCS before recv peer's FINISH message
@@ -409,18 +409,12 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         todo!()
                     }
 
-                    // This is indeed a desirable ServerHello TLS repr
-                    // Reprocess ServerHello into a slice
-                    // Update session with required parameter
-                    let mut array = [0; 512];
-                    let mut buffer = TlsBuffer::new(&mut array);
-                    buffer.enqueue_tls_repr(repr)?;
-                    let slice: &[u8] = buffer.into();
+                    // Get slice without reserialization
                     let mut session = self.session.borrow_mut();
                     session.client_update_for_sh(
                         selected_cipher.unwrap(),
                         server_public.unwrap(),
-                        &slice[5..]
+                        handshake_slice
                     );
                     // Key exchange occurred, seq_num is set to 0
                     // Do NOT update seq_num again. Early return.
