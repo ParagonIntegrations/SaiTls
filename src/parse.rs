@@ -31,7 +31,8 @@ use core::convert::TryInto;
 
 use alloc::vec::Vec;
 
-pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
+// Return handshake/payload slice and TLS Record
+pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], (&[u8], TlsRepr)> {
     let content_type = take(1_usize);
     let version = take(2_usize);
     let length = take(2_usize);
@@ -51,6 +52,9 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
         handshake: None,
     };
     let (rest, bytes) = take(repr.length)(rest)?;
+
+    // Store a copy of the TLS Handshake slice to return
+    let repr_slice_clone = bytes;
     {
         use crate::tls_packet::TlsContentType::*;
         match repr.content_type {
@@ -68,7 +72,7 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
             _ => todo!()
         }
     }
-    Ok((rest, repr))
+    Ok((rest, (repr_slice_clone, repr)))
 }
 
 // Convert TlsInnerPlainText in RFC 8446 into Handshake
@@ -76,9 +80,9 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], TlsRepr> {
 // 1. Handshake can coalesced into a larger TLS record
 // 2. Content type and zero paddings at the end
 // Return handshake slice for hashing
-pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8], (&[u8], Vec<HandshakeRepr>)> {
+pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8], Vec<(&[u8], HandshakeRepr)>> {
     let mut remaining_bytes = bytes;
-    let mut handshake_vec: Vec<HandshakeRepr> = Vec::new();
+    let mut handshake_vec: Vec<(&[u8], HandshakeRepr)> = Vec::new();
     
     loop {
         // Perform check on the number of remaining bytes
@@ -97,20 +101,19 @@ pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8]
             )(remaining_bytes)?;
             return Ok((
                 &[],
-                (
-                    // A concatenation of all handshakes received
-                    // The remaining content_type byte and zero paddings are stripped
-                    &bytes[
-                        ..(bytes.len()-remaining_bytes.len())
-                    ], 
-                    handshake_vec
-                )
+                // // A concatenation of all handshakes received
+                // // The remaining content_type byte and zero paddings are stripped
+                // &bytes[
+                //     ..(bytes.len()-remaining_bytes.len())
+                // ], 
+                handshake_vec
             ));
         }
 
         let (rem, handshake_repr) = parse_handshake(remaining_bytes)?;
+        let handshake_slice = &remaining_bytes[..(remaining_bytes.len()-rem.len())];
         remaining_bytes = rem;
-        handshake_vec.push(handshake_repr);
+        handshake_vec.push((handshake_slice, handshake_repr));
     }
 }
 

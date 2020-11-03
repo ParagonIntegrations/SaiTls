@@ -23,6 +23,7 @@ use aes_gcm::AeadInPlace;
 
 use nom::bytes::complete::take;
 use nom::error::ErrorKind;
+use nom::combinator::complete;
 
 use alloc::vec::Vec;
 use heapless::Vec as HeaplessVec;
@@ -202,6 +203,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
         // Read for TLS packet
         // Proposition: Decouple all data from TLS record layer before processing
+        //      Recouple a brand new TLS record wrapper
         let mut array: [u8; 2048] = [0; 2048];
         let mut tls_repr_vec = self.recv_tls_repr(sockets, &mut array)?;
 
@@ -209,15 +211,84 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         // Process as a queue
         let tls_repr_vec_size = tls_repr_vec.len();
         for _index in 0..tls_repr_vec_size {
-            let repr = tls_repr_vec.remove(0);
-            self.process(repr)?;
+            let (repr_slice, mut repr) = tls_repr_vec.remove(0);
+            // TODO:
+            // Check TLS content type
+            // If application data, decrypt before process.
+            // If there are multiple handshakes within a record,
+            //     give each of them a unique TLS record wrapper and process
+            //     If a pure application data is found, sliently ignore
+            // Otherwise process directly
+            log::info!("Record type: {:?}", repr.content_type);
+            if repr.content_type == TlsContentType::ApplicationData {
+                log::info!("Found application data");
+                // Take the payload out of TLS Record and decrypt
+                let mut app_data = repr.payload.take().unwrap();
+                let mut associated_data = [0; 5];
+                associated_data[0] = repr.content_type.into();
+                NetworkEndian::write_u16(
+                    &mut associated_data[1..3],
+                    repr.version.into()
+                );
+                NetworkEndian::write_u16(
+                    &mut associated_data[3..5],
+                    repr.length
+                );
+                {
+                    let mut session = self.session.borrow_mut();
+                    session.decrypt_in_place_detached(
+                        &associated_data,
+                        &mut app_data
+                    ).unwrap();
+                    // log::info!("Decypted data: {:?}", app_data);
+                    session.increment_server_sequence_number();
+                }
+
+                // Discard last 16 bytes (auth tag)
+                let inner_plaintext = &app_data[..app_data.len()-16];
+                let (inner_content_type, _) = get_content_type_inner_plaintext(
+                    inner_plaintext
+                );
+                if inner_content_type != TlsContentType::Handshake {
+                    // Silently ignore non-handshakes
+                    continue;
+                }
+                let (_, mut inner_handshakes) = complete(
+                    parse_inner_plaintext_for_handshake
+                )(inner_plaintext).unwrap();
+
+                // Sequentially process all handshakes
+                let num_of_handshakes = inner_handshakes.len();
+                for _ in 0..num_of_handshakes {
+                    let (handshake_slice, handshake_repr) = inner_handshakes.remove(0);
+                    self.process(
+                        handshake_slice,
+                        TlsRepr {
+                            content_type: TlsContentType::Handshake,
+                            version: repr.version,
+                            length: u16::try_from(handshake_repr.length).unwrap() + 4,
+                            payload: None,
+                            handshake: Some(handshake_repr)
+                        }
+                    )?;
+                }
+            }
+
+            
+            else {
+                self.process(repr_slice, repr)?;
+                log::info!("Processed record");
+            }
         }
 
         Ok(self.session.borrow().has_completed_handshake())
     }
 
     // Process TLS ingress during handshake
-    fn process(&self, mut repr: TlsRepr) -> Result<()> {
+    // The slice should ONLY include handshake overhead
+    // i.e. No  5 bytes of TLS Record
+    //      YES 4 bytes of HandshakeRepr, everything within the same handshake
+    fn process(&self, handshake_slice: &[u8], mut repr: TlsRepr) -> Result<()> {
         // Change_cipher_spec check:
         // Must receive CCS before recv peer's FINISH message
         // i.e. Must happen after START and before CONNECTED
@@ -226,8 +297,10 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         // Drop the message and update `received_change_cipher_spec`
         // Note: CSS doesn't count as a proper record, no need to increment sequence number
         if repr.is_change_cipher_spec() {
-            let mut session = self.session.borrow_mut();
+            log::info!("Change Cipher Spec");
+            let mut session = self.session.try_borrow_mut().expect("Cannot borrow mut");
             session.receive_change_cipher_spec();
+            log::info!("Changed Cipher Spec");
             return Ok(())
         }
 
@@ -357,34 +430,9 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
             // Expect encrypted extensions after receiving SH
             TlsState::WAIT_EE => {
-                // Check that the packet is classified as application data
-                if !repr.is_application_data() {
-                    // Abort communication, this affect IV calculation
-                    todo!()
-                }
-
-                // ExcepytedExtensions are disguised as ApplicationData
-                // Pull out the `payload` from TlsRepr, decrypt as EE
-                let mut payload = repr.payload.take().unwrap();
-                let mut array: [u8; 5] = [0; 5];
-                let mut buffer = TlsBuffer::new(&mut array);
-                buffer.write_u8(repr.content_type.into())?;
-                buffer.write_u16(repr.version.into())?;
-                buffer.write_u16(repr.length)?;
-                let associated_data: &[u8] = buffer.into();
-                {
-                    self.session.borrow_mut().decrypt_in_place(
-                        associated_data,
-                        &mut payload
-                    );
-                }
-
-                let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, (handshake_slice, mut handshake_vec)) = 
-                    parse_result.map_err(|_| Error::Unrecognized)?;
-
                 // Verify that it is indeed an EE
-                let might_be_ee = handshake_vec.remove(0);
+                // let might_be_ee = handshake_vec.remove(0);
+                let might_be_ee = repr.handshake.take().unwrap();
                 if might_be_ee.get_msg_type() != HandshakeType::EncryptedExtensions {
                     // Process the other handshakes in "handshake_vec"
                     todo!()
@@ -406,48 +454,16 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                     .client_update_for_ee(
                         &ee_slice
                     );
-
-                // TODO: Handle in WAIT_CERT_CR if there are still unprocessed handshakes
-                // Ideas: 1. Split off WAIT_CERT_CR handling into a separate function
-                //              so WAIT_EE branch can jsut call WAIT_CERT_CR branch
-                //              if there are extra handshake unprocessed
-                // 2. Merge state dependent listeners into 1 branch, execute conditionally
-            },
+                
+                log::info!("Received EE");
+           },
 
             // In this stage, wait for a certificate from server
             // Parse the certificate and check its content
             TlsState::WAIT_CERT_CR => {
-                // Check that the packet is classified as application data
-                // Certificates transfer is disguised as application data
-                if !repr.is_application_data() {
-                    // Abort communication, this affect IV calculation
-                    todo!()
-                }
-
-                // Pull out the `payload` from TlsRepr, decrypt as CERT
-                let mut payload = repr.payload.take().unwrap();
-
-                // Instantiate associated data and decrypt
-                let mut array: [u8; 5] = [0; 5];
-                let mut buffer = TlsBuffer::new(&mut array);
-                buffer.write_u8(repr.content_type.into())?;
-                buffer.write_u16(repr.version.into())?;
-                buffer.write_u16(repr.length)?;
-                let associated_data: &[u8] = buffer.into();
-                {
-                    self.session.borrow_mut().decrypt_in_place(
-                        associated_data,
-                        &mut payload
-                    );
-                }
-
-                // Parse the certificate from TLS payload
-                let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, (handshake_slice, mut handshake_vec)) = parse_result
-                    .map_err(|_| Error::Unrecognized)?;
-
                 // Verify that it is indeed an Certificate
-                let might_be_cert = handshake_vec.remove(0);
+                // let might_be_cert = handshake_vec.remove(0);
+                let might_be_cert = repr.handshake.take().unwrap();
                 if might_be_cert.get_msg_type() != HandshakeType::Certificate {
                     // Process the other handshakes in "handshake_vec"
                     todo!()
@@ -476,41 +492,15 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         &cert_slice,
                         cert.return_rsa_public_key().unwrap()
                     );
+                log::info!("Received WAIT_CERT_CR");
             },
 
             // In this stage, server will eventually send a CertificateVerify
             // Verify that the signature is indeed correct
             TlsState::WAIT_CV => {
-                // CertificateVerify is disguised as Application Data
-                if !repr.is_application_data() {
-                    // Abort communication, this affect IV calculation
-                    todo!()
-                }
-
-                // Pull out the `payload` from TlsRepr, decrypt as CV
-                let mut payload = repr.payload.take().unwrap();
-
-                // Instantiate associated data and decrypt
-                let mut array: [u8; 5] = [0; 5];
-                let mut buffer = TlsBuffer::new(&mut array);
-                buffer.write_u8(repr.content_type.into())?;
-                buffer.write_u16(repr.version.into())?;
-                buffer.write_u16(repr.length)?;
-                let associated_data: &[u8] = buffer.into();
-                {
-                    self.session.borrow_mut().decrypt_in_place(
-                        associated_data,
-                        &mut payload
-                    );
-                }
-
-                // Parse the certificate from TLS payload
-                let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, (handshake_slice, mut handshake_vec)) = parse_result
-                    .map_err(|_| Error::Unrecognized)?;
-
                 // Ensure that it is CertificateVerify
-                let might_be_cert_verify = handshake_vec.remove(0);
+                // let might_be_cert_verify = handshake_vec.remove(0);
+                let might_be_cert_verify = repr.handshake.take().unwrap();
                 if might_be_cert_verify.get_msg_type() != HandshakeType::CertificateVerify {
                     // Process the other handshakes in "handshake_vec"
                     todo!()
@@ -532,40 +522,14 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         sig_alg,
                         signature
                     );
+                log::info!("Received CV");
             },
 
             // Client will receive a Finished handshake from server
             TlsState::WAIT_FINISHED => {
-                // Finished is disguised as Application Data
-                if !repr.is_application_data() {
-                    // Abort communication, this affect IV calculation
-                    todo!()
-                }
-
-                // Pull out the `payload` from TlsRepr, decrypt as Finished
-                let mut payload = repr.payload.take().unwrap();
-
-                // Instantiate associated data and decrypt
-                let mut array: [u8; 5] = [0; 5];
-                let mut buffer = TlsBuffer::new(&mut array);
-                buffer.write_u8(repr.content_type.into())?;
-                buffer.write_u16(repr.version.into())?;
-                buffer.write_u16(repr.length)?;
-                let associated_data: &[u8] = buffer.into();
-                {
-                    self.session.borrow_mut().decrypt_in_place(
-                        associated_data,
-                        &mut payload
-                    );
-                }
-
-                // Parse the TLS inner ciphertext as a Finished handshake
-                let parse_result = parse_inner_plaintext_for_handshake(&payload);
-                let (_, (handshake_slice, mut handshake_vec)) = parse_result
-                    .map_err(|_| Error::Unrecognized)?;
-
                 // Ensure that it is Finished
-                let might_be_server_finished = handshake_vec.remove(0);
+                // let might_be_server_finished = handshake_vec.remove(0);
+                let might_be_server_finished = repr.handshake.take().unwrap();
                 if might_be_server_finished.get_msg_type() != HandshakeType::Finished {
                     // Process the other handshakes in "handshake_vec"
                     todo!()
@@ -586,15 +550,11 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         server_finished_slice,
                         might_be_server_finished.get_verify_data().unwrap()
                     );
+                log::info!("Received server FIN");
             }
 
             _ => {},
         }
-
-        // A TLS Record was received and processed and verified
-        // Increment sequence number
-        self.session.borrow_mut().increment_server_sequence_number();
-
         Ok(())
     }
 
@@ -693,18 +653,20 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
     // Generic inner recv method, through TCP socket
     // A TCP packet can contain multiple TLS records (including 0)
     // Therefore, sequence nubmer incrementation is not completed here
-    fn recv_tls_repr<'a>(&'a self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec::<TlsRepr>> {
+    fn recv_tls_repr<'a>(&'a self, sockets: &mut SocketSet, byte_array: &'a mut [u8]) -> Result<Vec<(&[u8], TlsRepr)>> {
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
         if !tcp_socket.can_recv() {
             return Ok(Vec::new());
         }
         let array_size = tcp_socket.recv_slice(byte_array)?;
-        let mut vec: Vec<TlsRepr> = Vec::new();
+        let mut vec: Vec<(&[u8], TlsRepr)> = Vec::new();
         let mut bytes: &[u8] = &byte_array[..array_size];
         loop {
             match parse_tls_repr(bytes) {
-                Ok((rest, repr)) => {
-                    vec.push(repr);
+                Ok((rest, (repr_slice, repr))) => {
+                    vec.push(
+                        (repr_slice, repr)
+                    );
                     if rest.len() == 0 {
                         return Ok(vec);
                     } else {

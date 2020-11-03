@@ -1121,6 +1121,7 @@ impl Session {
 
     // TODO: Merge decryption methods
     // Take control of the entire decryption, manually invoke detached decryption
+    // TODO: Bad naming, it should say the KEY of application data
     pub(crate) fn decrypt_application_data_in_place(
         &self,
         associated_data: &[u8],
@@ -1145,6 +1146,7 @@ impl Session {
         let mut processed_nonce: [u8; 12] = [0; 12];
         NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
 
+        // Duplicate authentication tag
         let buffer_size = buffer.len();
         let tag = GenericArray::clone_from_slice(&buffer[(buffer_size-16)..]);
 
@@ -1156,6 +1158,7 @@ impl Session {
         )
     }
 
+    // Decryption using handshake keys
     pub(crate) fn decrypt_in_place(
         &self,
         associated_data: &[u8],
@@ -1184,6 +1187,44 @@ impl Session {
             &GenericArray::from_slice(&processed_nonce),
             associated_data,
             buffer
+        )
+    }
+
+    // A veriant for handshake decryption in-place and detached
+    // Caller need to manually discard the authentication bytes
+    pub(crate) fn decrypt_in_place_detached(
+        &self,
+        associated_data: &[u8],
+        buffer: &mut [u8]
+    ) -> Result<(), Error> {
+        let (seq_num, nonce, cipher): (u64, &Vec<u8, U12>, &Cipher) = match self.role {
+            TlsRole::Server => {(
+                self.client_sequence_number,
+                self.client_handshake_nonce.as_ref().unwrap(),
+                self.client_handshake_cipher.as_ref().unwrap()
+            )},
+            TlsRole::Client => {(
+                self.server_sequence_number,
+                self.server_handshake_nonce.as_ref().unwrap(),
+                self.server_handshake_cipher.as_ref().unwrap()
+            )},
+        };
+
+        // Calculate XOR'ed nonce
+        let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
+        let clipped_seq_num: u128 = seq_num.into();
+        let mut processed_nonce: [u8; 12] = [0; 12];
+        NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
+
+        // Duplicate authentication tag
+        let buffer_size = buffer.len();
+        let tag = GenericArray::clone_from_slice(&buffer[(buffer_size-16)..]);
+
+        cipher.decrypt_in_place_detached(
+            &GenericArray::from_slice(&processed_nonce),
+            associated_data,
+            &mut buffer[..(buffer_size-16)],
+            &tag
         )
     }
 
