@@ -10,6 +10,7 @@ pub mod key;
 pub mod session;
 pub mod certificate;
 pub mod fake_rng;
+pub mod oid;
 
 // TODO: Implement errors
 // Details: Encapsulate smoltcp & nom errors

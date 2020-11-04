@@ -26,6 +26,9 @@ use crate::certificate::{
     TBSCertificate          as Asn1DerTBSCertificate,
 };
 
+use crate::oid;
+use crate::oid::*;
+
 use core::convert::TryFrom;
 use core::convert::TryInto;
 
@@ -650,7 +653,7 @@ pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerTBS
         subject_public_key_info, issuer_unique_id, subject_unique_id, extensions
     )) = complete(
         tuple((
-            parse_asn1_der_version,
+            opt(parse_asn1_der_version),
             parse_asn1_der_serial_number,
             parse_asn1_der_algorithm_identifier,
             parse_asn1_der_sequence,
@@ -659,9 +662,15 @@ pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerTBS
             parse_asn1_der_subject_key_public_info,
             opt(parse_asn1_der_bit_string),
             opt(parse_asn1_der_bit_string),
-            parse_asn1_der_extensions
+            opt(parse_asn1_der_extensions)
         ))
     )(value)?;
+
+    log::info!("Parsed tbscert");
+    let version = version.unwrap_or(Asn1DerVersion::v1);
+    let extensions = extensions.unwrap_or(
+        Asn1DerExtensions { extensions: Vec::new() }
+    );
 
     Ok((
         rest,
@@ -687,7 +696,7 @@ pub fn parse_asn1_der_version(bytes: &[u8]) -> IResult<&[u8], Asn1DerVersion> {
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0xA0
     if tag_val != 0xA0 {
-        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+        return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
     }
     // Parse the encapsulated INTEGER, force completeness
     let (_, integer) = complete(parse_asn1_der_integer)(value)?;
@@ -759,13 +768,11 @@ pub fn parse_asn1_der_algorithm_identifier(bytes: &[u8]) -> IResult<&[u8], Asn1D
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
-    // Parse OID and then optionl parameters
-    let (_, (oid, (_, _, optional_param))) = complete(
-        tuple((
-            parse_asn1_der_oid,
-            parse_asn1_der_object
-        ))
-    )(value)?;
+    // Parse OID, leave the rest as optionl parameters
+    let (optional_param, oid) = parse_asn1_der_oid(value)?;
+    log::info!("OID: {:X?}", oid);
+    log::info!("Optional parameter: {:X?}", optional_param);
+
     Ok((
         rest,
         Asn1DerAlgId {
@@ -841,6 +848,8 @@ pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], As
             parse_asn1_der_bit_string,
         ))
     )(value)?;
+    log::info!("Parsed subject key alg ident: {:?}", algorithm);
+    log::info!("Parsed key: {:X?}", subject_public_key);
     Ok((
         rest,
         Asn1DerSubjectPublicKeyInfo {
@@ -852,6 +861,7 @@ pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], As
 
 // Parser for extensions (Context-specific Sequence: 0xA3, then universal Sequence: 0x30)
 pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensions> {
+    log::info!("Invoked extension parsing");
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0xA3
     if tag_val != 0xA3 {
@@ -1135,19 +1145,188 @@ pub fn parse_asn1_der_rsa_public_key(bytes: &[u8]) -> IResult<&[u8], (&[u8], &[u
     ))
 }
 
-mod oid {
-    // Extensions
-    pub const CERT_KEY_USAGE:               &'static [u8] = &[85, 29, 15];                      // 2.5.29.15
-    pub const CERT_POLICIES:                &'static [u8] = &[85, 29, 32];                      // 2.5.29.32
-    pub const CERT_BASIC_CONSTRAINTS:       &'static [u8] = &[85, 29, 19];                      // 2.5.29.19
-    pub const CERT_EXT_KEY_USAGE:           &'static [u8] = &[85, 29, 37];                      // 2.5.29.37
-    pub const CERT_INHIBIT_ANY_POLICY:      &'static [u8] = &[85, 29, 54];                      // 2.5.29.54
-    // Extended Key Extensions
-    pub const ANY_EXTENDED_KEY_USAGE:       &'static [u8] = &[85, 29, 37, 0];                   // 2.5.29.37.0
-    pub const ID_KP_SERVER_AUTH:            &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 1];         // 1.3.6.1.5.5.7.3.1
-    pub const ID_KP_CLIENT_AUTH:            &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 2];         // 1.3.6.1.5.5.7.3.2
-    pub const ID_KP_CODE_SIGNING:           &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 3];         // 1.3.6.1.5.5.7.3.3
-    pub const ID_KP_EMAIL_PROTECTION:       &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 4];         // 1.3.6.1.5.5.7.3.4
-    pub const ID_KP_TIME_STAMPING:          &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 8];         // 1.3.6.1.5.5.7.3.8
-    pub const ID_KP_OCSP_SIGNING:           &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 9];         // 1.3.6.1.5.5.7.3.9
+/*
+ *  Prasers for PSS/OAEP signature algorithms parameters in certificate
+ */
+
+// Take addition parameter of PSS algorithm idenfier
+// Return hash function OID
+pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usize)> {    
+    // Handle the case where there is literally no optional parameter
+    // Return default SHA1 OID and 20 salt length
+    if params.len() == 0 {
+        return Ok((&[], (ID_SHA1, 20)))
+    }
+    
+    // Parse as RSASSA-PSS-params (Sequence: 0x30)
+    let (_, rsa_ssa_params) = complete(
+        parse_asn1_der_sequence
+    )(params)?;
+
+    let (_, (hash_alg, mgf_hash_alg, salt_len, _)) = complete(
+        tuple((
+            opt(parse_hash_algorithm),
+            opt(parse_mask_gen_algorithm),
+            opt(parse_salt_length),
+            opt(parse_trailer_field)
+        ))
+    )(params)?;
+
+    let hash_alg = hash_alg.unwrap_or(
+        Asn1DerAlgId { algorithm: ID_SHA1, parameters: &[] }
+    );
+    let mgf_hash_alg = mgf_hash_alg.unwrap_or(
+        Asn1DerAlgId { algorithm: ID_SHA1, parameters: &[] }
+    );
+    let salt_len = salt_len.unwrap_or(&[0x14]);
+
+    // // Parse HashAlgorithm [0]
+    // let (rest, (tag_val, _, hash_alg)) = parse_asn1_der_object(rsa_ssa_params)?;
+    // // Verify the tag is indeed 0xA0
+    // if tag_val != 0xA0 {
+    //     return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    // }
+    // // Parse the encapsulated algorithm identifier, force completeness
+    // let (_, hash_alg) = complete(parse_asn1_der_algorithm_identifier)(hash_alg)?;
+    
+    // // Parse MaskGenAlgorithm [1]
+    // let (rest, (tag_val, _, mask_gen_alg)) = parse_asn1_der_object(rest)?;
+    // // Verify the tag is indeed 0xA1
+    // if tag_val != 0xA1 {
+    //     return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    // }
+    // // Parse the encapsulated algorithm identifier, force completeness
+    // let (_, mgf) = complete(parse_asn1_der_algorithm_identifier)(mask_gen_alg)?;
+    // // Algorithm field of mgf should always be mgf1
+    // if mgf.algorithm != ID_MGF1 {
+    //     todo!()
+    // }
+    // // Parse the parameters of MGF Alg. Ident. to get hash algorithm under MGF
+    // let (_, mgf_hash_alg) = complete(parse_asn1_der_algorithm_identifier)(
+    //     mgf.parameters
+    // )?;
+
+    // // Parse salt length [2]
+    // let (rest, (tag_val, _, salt_len)) = parse_asn1_der_object(rest)?;
+    // if tag_val != 0xA2 {
+    //     return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    // }
+    // // Parse the encapsulated integer, force completeness
+    // let (_, salt_len) = complete(
+    //     parse_asn1_der_integer
+    // )(salt_len)?;
+
+    // // If there are still unprocessed data left, parse for trailer field
+    // if rest.len() != 0 {
+    //     // Parse trailer field [3]
+    //     let (_, (tag_val, _, trailer_field)) = complete(
+    //         parse_asn1_der_object
+    //     )(rest)?;
+    //     if tag_val != 0xA3 {
+    //         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    //     }
+    //     // Parse the encapsulated integer, force completeness
+    //     let (_, trailer_field) = complete(
+    //         parse_asn1_der_integer
+    //     )(trailer_field)?;
+    //     // The value must be 1 stated in RFC 4055
+    //     if trailer_field.len() < 1 || trailer_field[trailer_field.len() - 1] != 1 {
+    //         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    //     }
+    // }
+
+    // Verify that the hash functions listed in HashFunc and MGF are consistent
+    if hash_alg.algorithm != mgf_hash_alg.algorithm {
+        todo!()
+    }
+
+    // Parse encoded salt length integer into usize
+    if salt_len.len() > core::mem::size_of::<usize>() {
+        todo!()
+    }
+    let mut array_buffer: [u8; core::mem::size_of::<usize>()] = [0; core::mem::size_of::<usize>()];
+    array_buffer[(8-salt_len.len())..].clone_from_slice(salt_len);
+    let salt_len = usize::from_be_bytes(array_buffer);
+
+    Ok((
+        &[],
+        (
+            hash_alg.algorithm,
+            salt_len
+        )
+    ))
+}
+
+fn parse_hash_algorithm(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
+    // Parse HashAlgorithm [0]
+    let (rest, (tag_val, _, hash_alg)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag is indeed 0xA0
+    if tag_val != 0xA0 {
+        return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+    }
+    // Parse the encapsulated algorithm identifier, force completeness
+    let (_, hash_alg) = complete(parse_asn1_der_algorithm_identifier)(hash_alg)?;
+    Ok((
+        rest, hash_alg
+    ))
+}
+
+fn parse_mask_gen_algorithm(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
+    // Parse MaskGenAlgorithm [1]
+    let (rest, (tag_val, _, mask_gen_alg)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag is indeed 0xA1
+    if tag_val != 0xA1 {
+        return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+    }
+    // Parse the encapsulated algorithm identifier, force completeness
+    let (_, mgf) = complete(parse_asn1_der_algorithm_identifier)(mask_gen_alg)?;
+    // Algorithm field of mgf should always be mgf1
+    if mgf.algorithm != ID_MGF1 {
+        todo!()
+    }
+    // Parse the parameters of MGF Alg. Ident. to get hash algorithm under MGF
+    let (_, mgf_hash_alg) = complete(parse_asn1_der_algorithm_identifier)(
+        mgf.parameters
+    )?;
+    Ok((
+        rest, mgf_hash_alg
+    ))
+}
+
+fn parse_salt_length(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    // Parse salt length [2]
+    let (rest, (tag_val, _, salt_len)) = parse_asn1_der_object(bytes)?;
+    if tag_val != 0xA2 {
+        return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+    }
+    // Parse the encapsulated integer, force completeness
+    let (_, salt_len) = complete(
+        parse_asn1_der_integer
+    )(salt_len)?;
+
+    Ok((
+        rest, salt_len
+    ))
+}
+
+fn parse_trailer_field(bytes: &[u8]) -> IResult<&[u8], ()> {
+    // Parse trailer field [3]
+    let (_, (tag_val, _, trailer_field)) = complete(
+        parse_asn1_der_object
+    )(bytes)?;
+    if tag_val != 0xA3 {
+        return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+    }
+    // Parse the encapsulated integer, force completeness
+    let (_, trailer_field) = complete(
+        parse_asn1_der_integer
+    )(trailer_field)?;
+    // The value must be 1 stated in RFC 4055
+    if trailer_field.len() < 1 || trailer_field[trailer_field.len() - 1] != 1 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+
+    Ok((
+        &[], ()
+    ))
 }

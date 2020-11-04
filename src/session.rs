@@ -1455,3 +1455,29 @@ pub(crate) enum CertificatePublicKey {
         cert_eddsa_key: ed25519_dalek::PublicKey
     }
 }
+
+impl CertificatePublicKey {
+    pub(crate) fn get_rsa_public_key(&self) -> Result<&RSAPublicKey, ()> {
+        if let CertificatePublicKey::RSA { cert_rsa_public_key } = self {
+            Ok(&cert_rsa_public_key)
+        } else {
+            Err(())
+        }
+    }
+    pub(crate) fn get_ecdsa_secp256r1_sha256_verify_key(&self) -> Result<&p256::ecdsa::VerifyKey, ()> {
+        if let CertificatePublicKey::ECDSA_SECP256R1_SHA256 {
+            cert_verify_key
+        } = self {
+            Ok(&cert_verify_key)
+        } else {
+            Err(())
+        }
+    }
+    pub(crate) fn get_ed25519_public_key(&self) -> Result<&ed25519_dalek::PublicKey, ()> {
+        if let CertificatePublicKey::ED25519 { cert_eddsa_key } = self {
+            Ok(&cert_eddsa_key)
+        } else {
+            Err(())
+        }
+    }
+}

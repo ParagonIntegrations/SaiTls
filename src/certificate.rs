@@ -4,13 +4,19 @@ use num_enum::TryFromPrimitive;
 use generic_array::GenericArray;
 
 use crate::parse::parse_asn1_der_rsa_public_key;
+use crate::parse::parse_rsa_ssa_pss_parameters;
+
 use crate::Error as TlsError;
 use crate::session::CertificatePublicKey;
+use crate::oid::*;
+use crate::fake_rng::FakeRandom;
 
 use sha1::{Sha1, Digest};
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 use rsa::{PublicKey, RSAPublicKey, PaddingScheme, BigUint, Hash};
 
 use alloc::vec::Vec;
+use heapless::{ Vec as HeaplessVec, consts::* };
 
 #[derive(Debug, Clone)]
 pub struct Certificate<'a> {
@@ -143,6 +149,7 @@ pub struct AlgorithmIdentifier<'a> {
 
 // TODO: MOve this to impl block of Certificate
 // Verify self-signed root certificate parsed certificate
+// TODO: Remove this method, it will be replaced
 pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
     // Verify Signature
     match cert.signature_algorithm.algorithm {
@@ -150,9 +157,14 @@ pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
             let mut hasher = Sha1::new();
             hasher.update(cert.tbs_certificate_encoded);
 
+            log::info!("Created hashed");
+
             let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
                 cert.tbs_certificate.subject_public_key_info.subject_public_key
             ).map_err(|_| TlsError::ParsingError)?;
+
+            log::info!("Modulus: {:?}", modulus);
+            log::info!("Exponent: {:?}", exponent);
 
             let rsa_public_key = RSAPublicKey::new(
                 BigUint::from_bytes_be(modulus),
@@ -164,16 +176,17 @@ pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
                 padding,
                 &hasher.finalize(),
                 cert.signature_value
-            );
-            Ok(verify_result.is_ok())
-        }
+            ).unwrap();
+            Ok(true)
+        },
+        _ => Err(TlsError::SignatureValidationError)
     }
 }
 
 impl<'a> Certificate<'a> {
     // Return the public key, if used for RSA
     pub fn return_rsa_public_key(&self) -> Result<RSAPublicKey, ()> {
-        if self.signature_algorithm.algorithm != oid::SHA1_WITH_RSA_ENCRYPTION {
+        if self.signature_algorithm.algorithm != SHA1_WITH_RSA_ENCRYPTION {
             return Err(());
         }
         let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
@@ -195,25 +208,31 @@ impl<'a> Certificate<'a> {
 
         // 3 possibilities: RSA_ENCRYPTION, ID_EC_PUBLIC_KEY, and EdDSA25519
         match algorithm_identifier.algorithm {
-            oid::RSA_ENCRYPTION => {
+            RSA_ENCRYPTION => {
+                log::info!("Chose rsa encryption");
+                log::info!("Entire key: {:X?}", self.tbs_certificate.subject_public_key_info.subject_public_key);
                 let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
                     self.tbs_certificate.subject_public_key_info.subject_public_key
                 ).map_err(|_| ())?;
+                log::info!("Modulus: {:X?}\n, Exponent: {:X?}", modulus, exponent);
+
+                log::info!("Big int modulus: {:?}", BigUint::from_bytes_be(modulus));
         
                 let public_key = RSAPublicKey::new(
                     BigUint::from_bytes_be(modulus),
                     BigUint::from_bytes_be(exponent)
                 ).map_err(|_| ())?;
+                log::info!("Got rsa key parts");
                 Ok(
                     CertificatePublicKey::RSA {
                         cert_rsa_public_key: public_key
                     }
                 )
             },
-            oid::ID_EC_PUBLIC_KEY => {
+            ID_EC_PUBLIC_KEY => {
                 // Check the type of EC, only support secp256r1
                 // Will definitely NOT support custom curve
-                if algorithm_identifier.parameters != oid::PRIME256V1 {
+                if algorithm_identifier.parameters != PRIME256V1 {
                     return Err(());
                 }
                 let p256_verify_key = p256::ecdsa::VerifyKey::from_encoded_point(
@@ -229,7 +248,7 @@ impl<'a> Certificate<'a> {
                     }
                 )
             },
-            oid::ID_EDDSA_25519 => {
+            ID_EDDSA_25519 => {
                 let ed25519_public_key = ed25519_dalek::PublicKey::from_bytes(
                     public_key_info.subject_public_key
                 ).map_err(|_| ())?;
@@ -242,55 +261,159 @@ impl<'a> Certificate<'a> {
             _ => Err(())
         }
     }
+
+    // Validate certificate's signature
+    // Do not be confused with TLS Certificate Verify
+    pub fn validate_signature(&self) -> Result<(), TlsError> {
+        let sig_alg = self.signature_algorithm.algorithm;
+
+        // Prepare hash value
+        match sig_alg {
+            SHA1_WITH_RSA_ENCRYPTION => {
+                let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA1));
+                let hashed = Sha1::digest(self.tbs_certificate_encoded);
+                let sig = self.signature_value;
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_rsa_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify(padding, &hashed, sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
+            },
+
+            SHA224_WITH_RSA_ENCRYPTION => {
+                let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_224));
+                let hashed = Sha224::digest(self.tbs_certificate_encoded);
+                let sig = self.signature_value;
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_rsa_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify(padding, &hashed, sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
+            },
+
+            SHA256_WITH_RSA_ENCRYPTION => {
+                let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_256));
+                let hashed = Sha256::digest(self.tbs_certificate_encoded);
+                let sig = self.signature_value;
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_rsa_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify(padding, &hashed, sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
+            },
+
+            SHA384_WITH_RSA_ENCRYPTION => {
+                let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_384));
+                let hashed = Sha384::digest(self.tbs_certificate_encoded);
+                let sig = self.signature_value;
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_rsa_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify(padding, &hashed, sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
+            },
+
+            SHA512_WITH_RSA_ENCRYPTION => {
+                let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_512));
+                let hashed = Sha512::digest(self.tbs_certificate_encoded);
+                let sig = self.signature_value;
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_rsa_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify(padding, &hashed, sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
+            },
+            // Further process the signature algorithm before creating digests
+            // i.e. PSS, OAEP
+            ID_RSASSA_PSS => {
+                let (_, (hash_alg, salt_len)) = parse_rsa_ssa_pss_parameters(
+                    self.signature_algorithm.parameters
+                ).unwrap();
+                match hash_alg {
+                    ID_SHA1 => {
+                        let padding = PaddingScheme::new_pss_with_salt::<Sha1, FakeRandom>(
+                            FakeRandom {},
+                            salt_len
+                        );
+                        let hashed = Sha1::digest(self.tbs_certificate_encoded);
+                        let sig = self.signature_value;
+                        self.get_cert_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .get_rsa_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .verify(padding, &hashed, sig)
+                            .map_err(|_| TlsError::SignatureValidationError)
+                    },
+
+                    ID_SHA224 => {
+                        let padding = PaddingScheme::new_pss_with_salt::<Sha224, FakeRandom>(
+                            FakeRandom {},
+                            salt_len
+                        );
+                        let hashed = Sha224::digest(self.tbs_certificate_encoded);
+                        let sig = self.signature_value;
+                        self.get_cert_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .get_rsa_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .verify(padding, &hashed, sig)
+                            .map_err(|_| TlsError::SignatureValidationError)
+                    },
+
+                    ID_SHA256 => {
+                        let padding = PaddingScheme::new_pss_with_salt::<Sha256, FakeRandom>(
+                            FakeRandom {},
+                            salt_len
+                        );
+                        let hashed = Sha256::digest(self.tbs_certificate_encoded);
+                        let sig = self.signature_value;
+                        self.get_cert_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .get_rsa_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .verify(padding, &hashed, sig)
+                            .map_err(|_| TlsError::SignatureValidationError)
+                    },
+
+                    ID_SHA384 => {
+                        let padding = PaddingScheme::new_pss_with_salt::<Sha384, FakeRandom>(
+                            FakeRandom {},
+                            salt_len
+                        );
+                        let hashed = Sha384::digest(self.tbs_certificate_encoded);
+                        let sig = self.signature_value;
+                        self.get_cert_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .get_rsa_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .verify(padding, &hashed, sig)
+                            .map_err(|_| TlsError::SignatureValidationError)
+                    },
+
+                    ID_SHA512 => {
+                        let padding = PaddingScheme::new_pss_with_salt::<Sha512, FakeRandom>(
+                            FakeRandom {},
+                            salt_len
+                        );
+                        let hashed = Sha512::digest(self.tbs_certificate_encoded);
+                        let sig = self.signature_value;
+                        self.get_cert_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .get_rsa_public_key()
+                            .map_err(|_| TlsError::SignatureValidationError)?
+                            .verify(padding, &hashed, sig)
+                            .map_err(|_| TlsError::SignatureValidationError)
+                    },
+                    _ => todo!()
+                }
+            }
+            _ => todo!()
+        }
+
+    }
 }
-
-// TODO: Centralize OID, another OID module can be found in `parse.rs`
-mod oid {
-    // RSA public key
-    pub const RSA_ENCRYPTION: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
-        
-    // EC public key for secp256r1
-    pub const ID_EC_PUBLIC_KEY: &'static [u8] = 
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
-    pub const PRIME256V1: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
-
-    // EDDSA25519 public key, signature algorithm
-    pub const ID_EDDSA_25519: &'static [u8] =
-        &[0x2B, 0x65, 0x70];
-    
-    // Supported Signature Algorithm (RFC 4055, RFC 3279)
-    // PKCS #1 v1.5
-    pub const SHA1_WITH_RSA_ENCRYPTION: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
-    pub const SHA224_WITH_RSA_ENCRYPTION: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0E];
-    pub const SHA256_WITH_RSA_ENCRYPTION: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B];
-    pub const SHA384_WITH_RSA_ENCRYPTION: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C];
-    pub const SHA512_WITH_RSA_ENCRYPTION: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D];
-    
-    // RSASSA_PSS
-    pub const ID_RSASSA_PSS: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
-    
-    // RSAES_OAEP
-    pub const ID_RSAES_OAEP: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x07];
-
-    // ECDSA signature algorithms, from OID repo
-    pub const ECDSA_WITH_SHA1: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x01];
-    pub const ECDSA_WITH_SHA224: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x01];
-    pub const ECDSA_WITH_SHA256: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
-    pub const ECDSA_WITH_SHA384: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03];
-    pub const ECDSA_WITH_SHA512: &'static [u8] =
-        &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04];
-}
-
