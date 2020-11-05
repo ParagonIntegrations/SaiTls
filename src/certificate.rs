@@ -154,24 +154,7 @@ pub struct AlgorithmIdentifier<'a> {
 }
 
 impl<'a> Certificate<'a> {
-    // Return the public key, if used for RSA
-    pub fn return_rsa_public_key(&self) -> Result<RSAPublicKey, ()> {
-        if self.signature_algorithm.algorithm != SHA1_WITH_RSA_ENCRYPTION {
-            return Err(());
-        }
-        let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
-            self.tbs_certificate.subject_public_key_info.subject_public_key
-        ).map_err(|_| ())?;
-
-        RSAPublicKey::new(
-            BigUint::from_bytes_be(modulus),
-            BigUint::from_bytes_be(exponent)
-        ).map_err(|_| ())
-    }
-
     // General return public key method
-    // TODO: Replace return_rsa_public_key() with this method
-    // Things to change: session.rs: client_update_for_wait_cert_cr
     pub(crate) fn get_cert_public_key(&self) -> Result<CertificatePublicKey, ()> {
         let public_key_info = &self.tbs_certificate.subject_public_key_info;
         let algorithm_identifier = &public_key_info.algorithm;
