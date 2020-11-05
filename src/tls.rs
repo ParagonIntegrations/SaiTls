@@ -126,12 +126,13 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 // Prepare field that is randomised,
                 // Supply it to the TLS repr builder.
                 let ecdh_secret = EphemeralSecret::random(&mut self.rng);
+                let x25519_secret = x25519_dalek::EphemeralSecret::new(&mut self.rng);
                 let mut random: [u8; 32] = [0; 32];
                 let mut session_id: [u8; 32] = [0; 32];
                 self.rng.fill_bytes(&mut random);
                 self.rng.fill_bytes(&mut session_id);
                 let repr = TlsRepr::new()
-                    .client_hello(&ecdh_secret, random, session_id.clone());
+                    .client_hello(&ecdh_secret, &x25519_secret, random, session_id.clone());
 
                 // Update hash function with client hello handshake
                 let mut array = [0; 512];
@@ -145,6 +146,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 // Update TLS session
                 self.session.borrow_mut().client_update_for_ch(
                     ecdh_secret,
+                    x25519_secret,
                     session_id,
                     &slice[5..]
                 );
@@ -313,7 +315,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 if repr.is_server_hello() {
                     // Check SH content:
                     // random: Cannot represent HelloRequestRetry
-                    //        (TODO: Support other key shares, e.g. X25519)
                     // session_id_echo: should be same as the one sent by client
                     // cipher_suite: Store
                     //        (TODO: Check if such suite was offered)
@@ -321,11 +322,11 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                     //
                     // Check extensions:
                     // supported_version: Must be TLS 1.3
-                    // key_share: Store key, must be in secp256r1
-                    //        (TODO: Support other key shares ^)
+                    // key_share: Store key, must be in secp256r1 or x25519
 
                     // "Cache" for ECDHE server public info
-                    let mut server_public: Option<EncodedPoint> = None;
+                    let mut p256_public: Option<EncodedPoint> = None;
+                    let mut x25519_public: Option<x25519_dalek::PublicKey> = None;
                     let mut selected_cipher: Option<CipherSuite> = None;
 
                     // Process the handshake data within ServerHello
@@ -377,22 +378,25 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                                         server_share
                                     }
                                 ) = &extension.extension_data {
-                                    // TODO: Use legitimate checking to ensure the chosen
-                                    // group is indeed acceptable, when allowing more (EC)DHE
-                                    // key sharing
-                                    if server_share.group != NamedGroup::secp256r1 {
-                                        // Abort for wrong key sharing
-                                        todo!()
+                                    match server_share.group {
+                                        NamedGroup::secp256r1 => {
+                                            p256_public.replace(
+                                                EncodedPoint::from_untagged_bytes(
+                                                    GenericArray::from_slice(&server_share.key_exchange[1..])
+                                                )
+                                            );
+                                        },
+                                        NamedGroup::x25519 => {
+                                            let mut x25519_server_key: [u8; 32] = [0; 32];
+                                            x25519_server_key.clone_from_slice(&server_share.key_exchange);
+                                            x25519_public.replace(
+                                                x25519_dalek::PublicKey::from(
+                                                    x25519_server_key
+                                                )
+                                            );
+                                        }
+                                        _ => todo!()
                                     }
-                                    // Store key
-                                    // It is surely from secp256r1, no other groups are permitted
-                                    // Convert untagged bytes into encoded point on p256 eliptic curve
-                                    // Slice the first byte out of the bytes
-                                    server_public.replace(
-                                        EncodedPoint::from_untagged_bytes(
-                                            GenericArray::from_slice(&server_share.key_exchange[1..])
-                                        )
-                                    );
                                 }
                             }
                         }
@@ -402,8 +406,8 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         todo!()
                     }
 
-                    // Check that both selected_cipher and server_public were received
-                    if selected_cipher.is_none() || server_public.is_none() {
+                    // Check that both selected_cipher and (p256_public XNOR x25519_public) were received
+                    if selected_cipher.is_none() || (p256_public.is_none() && x25519_public.is_none()) {
                         // Abort communication
                         todo!()
                     }
@@ -412,7 +416,8 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                     let mut session = self.session.borrow_mut();
                     session.client_update_for_sh(
                         selected_cipher.unwrap(),
-                        server_public.unwrap(),
+                        p256_public,
+                        x25519_public,
                         handshake_slice
                     );
                     // Key exchange occurred, seq_num is set to 0

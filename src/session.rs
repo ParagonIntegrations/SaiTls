@@ -34,7 +34,7 @@ pub(crate) struct Session {
     // Hash functions needed
     hash: Hash,
     // Ephemeral secret for ECDHE key exchange
-    ecdhe_secret: Option<EphemeralSecret>,
+    ecdhe_secret: Option<(EphemeralSecret, x25519_dalek::EphemeralSecret)>,
     // Block ciphers for client & server
     client_handshake_cipher: Option<Cipher>,
     server_handshake_cipher: Option<Cipher>,
@@ -101,6 +101,7 @@ impl Session {
     pub(crate) fn client_update_for_ch(
         &mut self,
         ecdhe_secret: EphemeralSecret,
+        x25519_secret: x25519_dalek::EphemeralSecret,
         session_id: [u8; 32],
         ch_slice: &[u8]
     ) {
@@ -108,7 +109,7 @@ impl Session {
         if self.state != TlsState::START || self.role != TlsRole::Client {
             todo!()
         }
-        self.ecdhe_secret = Some(ecdhe_secret);
+        self.ecdhe_secret = Some((ecdhe_secret, x25519_secret));
         self.session_id = Some(session_id);
         self.hash.update(ch_slice);
         self.state = TlsState::WAIT_SH;
@@ -120,7 +121,8 @@ impl Session {
     pub(crate) fn client_update_for_sh(
         &mut self,
         cipher_suite: CipherSuite,
-        encoded_point: EncodedPoint,
+        encoded_point: Option<EncodedPoint>,
+        x25519_shared: Option<x25519_dalek::PublicKey>,
         sh_slice: &[u8]
     ) {
         // Handle inappropriate call to move state
@@ -129,12 +131,34 @@ impl Session {
         }
         // Generate ECDHE shared secret
         // Remove private secret
-        let ecdhe_shared_secret =
-            self.ecdhe_secret
-                .take()
-                .unwrap()
-                .diffie_hellman(&encoded_point)
-                .unwrap();
+        // let ecdhe_shared_secret =
+        //     self.ecdhe_secret
+        //         .take()
+        //         .unwrap()
+        //         .diffie_hellman(&encoded_point)
+        //         .unwrap();
+        
+        let mut shared_secret_bytes: [u8; 32] = [0; 32];
+        if encoded_point.is_some() {
+            let p256_shared_secret =
+                self.ecdhe_secret
+                    .take()
+                    .unwrap()
+                    .0
+                    .diffie_hellman(&encoded_point.unwrap())
+                    .unwrap();
+            shared_secret_bytes.clone_from_slice(p256_shared_secret.as_bytes());
+        } else if x25519_shared.is_some() {
+            let x25519_shared_secret =
+                self.ecdhe_secret
+                    .take()
+                    .unwrap()
+                    .1
+                    .diffie_hellman(&x25519_shared.unwrap());
+            shared_secret_bytes.clone_from_slice(x25519_shared_secret.as_bytes());
+        } else {
+            todo!()
+        }
 
         // Generate Handshake secret
         match cipher_suite {
@@ -161,7 +185,7 @@ impl Session {
                 let (handshake_secret, handshake_secret_hkdf) =
                     Hkdf::<Sha256>::extract(
                         Some(&derived_secret),
-                        ecdhe_shared_secret.as_bytes()
+                        &shared_secret_bytes
                     );
 
                 // Store the handshake secret
@@ -349,7 +373,7 @@ impl Session {
                 let (handshake_secret, handshake_secret_hkdf) =
                     Hkdf::<Sha384>::extract(
                         Some(&derived_secret),
-                        ecdhe_shared_secret.as_bytes()
+                        &shared_secret_bytes
                     );
 
                 // Store the handshake secret

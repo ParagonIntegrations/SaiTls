@@ -59,14 +59,14 @@ impl<'a> TlsRepr<'a> {
         }
     }
 
-    pub(crate) fn client_hello(mut self, secret: &EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
+    pub(crate) fn client_hello(mut self, p256_secret: &EphemeralSecret, x25519_secret: &x25519_dalek::EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
         self.content_type = TlsContentType::Handshake;
         self.version = TlsVersion::Tls10;
         let handshake_repr = {
             let mut repr = HandshakeRepr::new();
             repr.msg_type = HandshakeType::ClientHello;
             repr.handshake_data = HandshakeData::ClientHello({
-                ClientHello::new(secret, random, session_id)
+                ClientHello::new(p256_secret, x25519_secret, random, session_id)
             });
             repr.length = repr.handshake_data.get_length().try_into().unwrap();
             repr
@@ -252,7 +252,7 @@ impl<'a> HandshakeData<'a> {
 }
 
 impl<'a> ClientHello<'a> {
-    pub(self) fn new(secret: &EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
+    pub(self) fn new(p256_secret: &EphemeralSecret, x25519_secret: &x25519_dalek::EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
         let mut client_hello = ClientHello {
             version: TlsVersion::Tls12,
             random,
@@ -274,7 +274,7 @@ impl<'a> ClientHello<'a> {
 
         client_hello.add_ch_supported_versions()
             .add_sig_algs()
-            .add_client_groups_with_key_shares(secret)
+            .add_client_groups_with_key_shares(p256_secret, x25519_secret)
             .finalise()
     }
 
@@ -354,9 +354,10 @@ impl<'a> ClientHello<'a> {
         self
     }
 
-    pub(crate) fn add_client_groups_with_key_shares(mut self, ecdh_secret: &EphemeralSecret) -> Self {
+    pub(crate) fn add_client_groups_with_key_shares(mut self, ecdh_secret: &EphemeralSecret, x25519_secret: &x25519_dalek::EphemeralSecret) -> Self {
         // List out all supported groups
         let mut list = Vec::new();
+        list.push(NamedGroup::x25519);
         list.push(NamedGroup::secp256r1);
 
         let length = list.len()*2;
@@ -384,6 +385,19 @@ impl<'a> ClientHello<'a> {
                         key_exchange
                     }
                 },
+
+                NamedGroup::x25519 => {
+                    let x25519_public = x25519_dalek::PublicKey::from(x25519_secret);
+                    key_exchange.extend_from_slice(x25519_public.as_bytes());
+
+                    let key_exchange_length = key_exchange.len();
+
+                    KeyShareEntry {
+                        group: *named_group,
+                        length: key_exchange_length.try_into().unwrap(),
+                        key_exchange
+                    }
+                }
                 // TODO: Implement keygen for other named groups
                 _ => todo!(),
             };

@@ -50,6 +50,11 @@ version = "1.0.1"
 default-features = false
 features = [ "u64_backend" ]
 
+[dependencies.x25519-dalek]
+version = "1.1.0"
+default-features = false
+features = [ "u64_backend" ]
+
 # Fetch from master, for "no_std" + "alloc" combination
 [dependencies.rsa]
 git = "https://github.com/RustCrypto/RSA.git"
