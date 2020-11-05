@@ -1146,7 +1146,7 @@ pub fn parse_asn1_der_rsa_public_key(bytes: &[u8]) -> IResult<&[u8], (&[u8], &[u
 }
 
 /*
- *  Prasers for PSS/OAEP signature algorithms parameters in certificate
+ *  Prasers for PSS signature algorithms parameters in certificate
  */
 
 // Take addition parameter of PSS algorithm idenfier
@@ -1179,61 +1179,6 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
         Asn1DerAlgId { algorithm: ID_SHA1, parameters: &[] }
     );
     let salt_len = salt_len.unwrap_or(&[0x14]);
-
-    // // Parse HashAlgorithm [0]
-    // let (rest, (tag_val, _, hash_alg)) = parse_asn1_der_object(rsa_ssa_params)?;
-    // // Verify the tag is indeed 0xA0
-    // if tag_val != 0xA0 {
-    //     return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
-    // }
-    // // Parse the encapsulated algorithm identifier, force completeness
-    // let (_, hash_alg) = complete(parse_asn1_der_algorithm_identifier)(hash_alg)?;
-    
-    // // Parse MaskGenAlgorithm [1]
-    // let (rest, (tag_val, _, mask_gen_alg)) = parse_asn1_der_object(rest)?;
-    // // Verify the tag is indeed 0xA1
-    // if tag_val != 0xA1 {
-    //     return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
-    // }
-    // // Parse the encapsulated algorithm identifier, force completeness
-    // let (_, mgf) = complete(parse_asn1_der_algorithm_identifier)(mask_gen_alg)?;
-    // // Algorithm field of mgf should always be mgf1
-    // if mgf.algorithm != ID_MGF1 {
-    //     todo!()
-    // }
-    // // Parse the parameters of MGF Alg. Ident. to get hash algorithm under MGF
-    // let (_, mgf_hash_alg) = complete(parse_asn1_der_algorithm_identifier)(
-    //     mgf.parameters
-    // )?;
-
-    // // Parse salt length [2]
-    // let (rest, (tag_val, _, salt_len)) = parse_asn1_der_object(rest)?;
-    // if tag_val != 0xA2 {
-    //     return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
-    // }
-    // // Parse the encapsulated integer, force completeness
-    // let (_, salt_len) = complete(
-    //     parse_asn1_der_integer
-    // )(salt_len)?;
-
-    // // If there are still unprocessed data left, parse for trailer field
-    // if rest.len() != 0 {
-    //     // Parse trailer field [3]
-    //     let (_, (tag_val, _, trailer_field)) = complete(
-    //         parse_asn1_der_object
-    //     )(rest)?;
-    //     if tag_val != 0xA3 {
-    //         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
-    //     }
-    //     // Parse the encapsulated integer, force completeness
-    //     let (_, trailer_field) = complete(
-    //         parse_asn1_der_integer
-    //     )(trailer_field)?;
-    //     // The value must be 1 stated in RFC 4055
-    //     if trailer_field.len() < 1 || trailer_field[trailer_field.len() - 1] != 1 {
-    //         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
-    //     }
-    // }
 
     // Verify that the hash functions listed in HashFunc and MGF are consistent
     if hash_alg.algorithm != mgf_hash_alg.algorithm {
@@ -1329,4 +1274,17 @@ fn parse_trailer_field(bytes: &[u8]) -> IResult<&[u8], ()> {
     Ok((
         &[], ()
     ))
+}
+
+// Parser for identifying `r` and `s` fields of ECDSA signatures
+pub fn parse_ecdsa_signature(sig: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
+    let (_, sig_val) = complete(
+        parse_asn1_der_sequence
+    )(sig)?;
+    complete(
+        tuple((
+            parse_asn1_der_integer,
+            parse_asn1_der_integer
+        ))
+    )(sig_val)
 }

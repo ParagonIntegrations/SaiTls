@@ -5,6 +5,8 @@ use generic_array::GenericArray;
 
 use crate::parse::parse_asn1_der_rsa_public_key;
 use crate::parse::parse_rsa_ssa_pss_parameters;
+use crate::parse::parse_ecdsa_signature;
+use crate::parse::parse_asn1_der_oid;
 
 use crate::Error as TlsError;
 use crate::session::CertificatePublicKey;
@@ -15,8 +17,12 @@ use sha1::{Sha1, Digest};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 use rsa::{PublicKey, RSAPublicKey, PaddingScheme, BigUint, Hash};
 
+use p256::ecdsa::signature::{Verifier, DigestVerifier};
+
 use alloc::vec::Vec;
 use heapless::{ Vec as HeaplessVec, consts::* };
+
+use core::convert::TryFrom;
 
 #[derive(Debug, Clone)]
 pub struct Certificate<'a> {
@@ -147,42 +153,6 @@ pub struct AlgorithmIdentifier<'a> {
     pub parameters: &'a [u8],
 }
 
-// TODO: MOve this to impl block of Certificate
-// Verify self-signed root certificate parsed certificate
-// TODO: Remove this method, it will be replaced
-pub fn validate_root_certificate(cert: &Certificate) -> Result<bool, TlsError> {
-    // Verify Signature
-    match cert.signature_algorithm.algorithm {
-        SHA1_WITH_RSA_ENCRYPTION => {
-            let mut hasher = Sha1::new();
-            hasher.update(cert.tbs_certificate_encoded);
-
-            log::info!("Created hashed");
-
-            let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
-                cert.tbs_certificate.subject_public_key_info.subject_public_key
-            ).map_err(|_| TlsError::ParsingError)?;
-
-            log::info!("Modulus: {:?}", modulus);
-            log::info!("Exponent: {:?}", exponent);
-
-            let rsa_public_key = RSAPublicKey::new(
-                BigUint::from_bytes_be(modulus),
-                BigUint::from_bytes_be(exponent)
-            ).map_err(|_| TlsError::SignatureValidationError)?;
-
-            let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA1));
-            let verify_result = rsa_public_key.verify(
-                padding,
-                &hasher.finalize(),
-                cert.signature_value
-            ).unwrap();
-            Ok(true)
-        },
-        _ => Err(TlsError::SignatureValidationError)
-    }
-}
-
 impl<'a> Certificate<'a> {
     // Return the public key, if used for RSA
     pub fn return_rsa_public_key(&self) -> Result<RSAPublicKey, ()> {
@@ -230,11 +200,16 @@ impl<'a> Certificate<'a> {
                 )
             },
             ID_EC_PUBLIC_KEY => {
-                // Check the type of EC, only support secp256r1
+                // Check the type of EC, only support secp256r1, parse as OID
+                // Other types of EC repreesntation (EC param) is not be supported
+                let (_, ec_oid) = parse_asn1_der_oid(algorithm_identifier.parameters)
+                    .map_err(|_| ())?;
                 // Will definitely NOT support custom curve
-                if algorithm_identifier.parameters != PRIME256V1 {
+                if ec_oid != PRIME256V1 {
                     return Err(());
                 }
+                log::info!("Acceptable OID");
+                log::info!("Public key into slice: {:X?}", &public_key_info.subject_public_key[1..]);
                 let p256_verify_key = p256::ecdsa::VerifyKey::from_encoded_point(
                     &p256::EncodedPoint::from_untagged_bytes(
                         GenericArray::from_slice(
@@ -242,6 +217,7 @@ impl<'a> Certificate<'a> {
                         )
                     )
                 ).map_err(|_| ())?;
+                log::info!("Have verify key");
                 Ok(
                     CertificatePublicKey::ECDSA_SECP256R1_SHA256 {
                         cert_verify_key: p256_verify_key
@@ -262,9 +238,9 @@ impl<'a> Certificate<'a> {
         }
     }
 
-    // Validate certificate's signature
+    // Validate signature of self-signed certificate
     // Do not be confused with TLS Certificate Verify
-    pub fn validate_signature(&self) -> Result<(), TlsError> {
+    pub fn validate_self_signed_signature(&self) -> Result<(), TlsError> {
         let sig_alg = self.signature_algorithm.algorithm;
 
         // Prepare hash value
@@ -328,8 +304,7 @@ impl<'a> Certificate<'a> {
                     .verify(padding, &hashed, sig)
                     .map_err(|_| TlsError::SignatureValidationError)
             },
-            // Further process the signature algorithm before creating digests
-            // i.e. PSS, OAEP
+            // Further process the signature algorithm of PSS before creating digests
             ID_RSASSA_PSS => {
                 let (_, (hash_alg, salt_len)) = parse_rsa_ssa_pss_parameters(
                     self.signature_algorithm.parameters
@@ -409,9 +384,40 @@ impl<'a> Certificate<'a> {
                             .verify(padding, &hashed, sig)
                             .map_err(|_| TlsError::SignatureValidationError)
                     },
+
+                    // TODO: SHA3 is not on the table, implement better error rejection
                     _ => todo!()
                 }
+            },
+
+            // ECDSA signature algorithm (support only `edcsa_secp256r1_sha256`)
+            ECDSA_WITH_SHA256 => {
+                let (_, (r, s)) = parse_ecdsa_signature(self.signature_value)
+                    .map_err(|_| TlsError::SignatureValidationError)?;
+                let sig = p256::ecdsa::Signature::from_asn1(self.signature_value)
+                    .map_err(|_| TlsError::SignatureValidationError)?;
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_ecdsa_secp256r1_sha256_verify_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify(self.tbs_certificate_encoded, &sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
+            },
+
+            // Ed25519 signature algorithm
+            ID_EDDSA_25519 => {
+                let sig = ed25519_dalek::Signature::try_from(
+                    self.signature_value
+                ).map_err(|_| TlsError::SignatureValidationError)?;
+                log::info!("Ed25519 signature: {:?}", sig);
+                self.get_cert_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .get_ed25519_public_key()
+                    .map_err(|_| TlsError::SignatureValidationError)?
+                    .verify_strict(self.tbs_certificate_encoded, &sig)
+                    .map_err(|_| TlsError::SignatureValidationError)
             }
+
             _ => todo!()
         }
 

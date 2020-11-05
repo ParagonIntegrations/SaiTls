@@ -36,7 +36,6 @@ use crate::parse::{
 };
 use crate::buffer::TlsBuffer;
 use crate::session::{Session, TlsRole};
-use crate::certificate::validate_root_certificate;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
@@ -468,10 +467,11 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
                 // TODO: Replace this block after implementing a proper 
                 // certificate verification procdeure
-                match validate_root_certificate(cert) {
-                    Ok(true) => {},
-                    _ => panic!("Certificate does not match")
-                }
+                // match validate_root_certificate(cert) {
+                //     Ok(true) => {},
+                //     _ => panic!("Certificate does not match")
+                // }
+                cert.validate_self_signed_signature().expect("Signature mismatched");
 
                 // Update session TLS state to WAIT_CV
                 // Length of handshake header is 4
@@ -484,7 +484,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                 self.session.borrow_mut()
                     .client_update_for_wait_cert_cr(
                         &cert_slice,
-                        cert.return_rsa_public_key().unwrap()
+                        cert.get_cert_public_key().unwrap()
                     );
                 log::info!("Received WAIT_CERT_CR");
             },

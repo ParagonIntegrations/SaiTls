@@ -62,7 +62,6 @@ pub(crate) struct Session {
     server_sequence_number: u64,
     // Certificate public key
     // For Handling CertificateVerify
-    cert_rsa_public_key: Option<RSAPublicKey>,      // TODO: Replace and remove
     cert_public_key: Option<CertificatePublicKey>,
 }
 
@@ -94,7 +93,6 @@ impl Session {
             server_application_nonce: None,
             client_sequence_number: 0,
             server_sequence_number: 0,
-            cert_rsa_public_key: None,      // TODO: Remove over-specific public key
             cert_public_key: None
         }
     }
@@ -477,10 +475,10 @@ impl Session {
     pub(crate) fn client_update_for_wait_cert_cr(
         &mut self,
         cert_slice: &[u8],
-        cert_rsa_public_key: RSAPublicKey
+        cert_public_key: CertificatePublicKey
     ) {
         self.hash.update(cert_slice);
-        self.cert_rsa_public_key.replace(cert_rsa_public_key);
+        self.cert_public_key.replace(cert_public_key);
         self.state = TlsState::WAIT_CV;
     }
 
@@ -546,9 +544,14 @@ impl Session {
                     .chain(&transcript_hash)
                     .finalize();
                 let padding = get_rsa_padding_scheme(signature_algorithm);
-                let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
-                    padding, &verify_hash, signature
-                );
+                let verify_result = self.cert_public_key
+                    .take()
+                    .unwrap()
+                    .get_rsa_public_key()
+                    .unwrap()
+                    .verify(
+                        padding, &verify_hash, signature
+                    );
                 if verify_result.is_err() {
                     todo!()
                 }
@@ -561,9 +564,14 @@ impl Session {
                     .chain(&transcript_hash)
                     .finalize();
                 let padding = get_rsa_padding_scheme(signature_algorithm);
-                let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
-                    padding, &verify_hash, signature
-                );
+                let verify_result = self.cert_public_key
+                    .take()
+                    .unwrap()
+                    .get_rsa_public_key()
+                    .unwrap()
+                    .verify(
+                        padding, &verify_hash, signature
+                    );
                 log::info!("Algorithm {:?} Certificate verify: {:?}", signature_algorithm, verify_result);
                 if verify_result.is_err() {
                     todo!()
@@ -577,9 +585,14 @@ impl Session {
                     .chain(&transcript_hash)
                     .finalize();
                 let padding = get_rsa_padding_scheme(signature_algorithm);
-                let verify_result = self.cert_rsa_public_key.take().unwrap().verify(
-                    padding, &verify_hash, signature
-                );
+                let verify_result = self.cert_public_key
+                    .take()
+                    .unwrap()
+                    .get_rsa_public_key()
+                    .unwrap()
+                    .verify(
+                        padding, &verify_hash, signature
+                    );
                 if verify_result.is_err() {
                     todo!()
                 }
