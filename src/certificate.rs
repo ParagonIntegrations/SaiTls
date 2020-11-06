@@ -106,7 +106,9 @@ pub enum ExtensionValue<'a> {
     },
 
     // Permitted subtrees and excluded subtrees are not implemented
-    // SubjectAlternativeName,
+    SubjectAlternativeName {
+        general_names: Vec<GeneralName<'a>>,
+    },
 
     BasicConstraints {
         is_ca: bool,
@@ -139,6 +141,25 @@ pub enum ExtensionValue<'a> {
 
     // Extension data from an unsupported extension type
     Unrecognized,
+}
+
+#[derive(Debug, Clone)]
+pub enum GeneralName<'a> {
+    OtherName {
+        type_id: &'a [u8],
+        value: &'a [u8],
+    },
+    RFC822Name(&'a [u8]),
+    DNSName(&'a [u8]),
+    X400Address(&'a [u8]),
+    DirectoryName(&'a [u8]),
+    EDIPartyName{
+        name_assigner: &'a [u8],
+        party_name: &'a [u8],
+    },
+    URI(&'a [u8]),
+    IPAddress(&'a [u8]),
+    RegisteredID(&'a [u8]),
 }
 
 #[derive(Debug, Clone)]

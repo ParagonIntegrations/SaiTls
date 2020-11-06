@@ -26,6 +26,7 @@ use crate::certificate::{
     TBSCertificate          as Asn1DerTBSCertificate,
     Name                    as Asn1DerName,
     AttributeTypeAndValue   as Asn1DerAttribute,
+    GeneralName             as Asn1DerGeneralName
 };
 
 use crate::oid;
@@ -997,6 +998,12 @@ pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
             )(rem_ext_data)?;
             extension_value
         },
+        oid::CERT_SUBJECTALTNAME => {
+            let (_, extension_value) = complete(
+                parse_asn1_der_subject_alternative_name
+            )(rem_ext_data)?;
+            extension_value
+        }
         // TODO: Parse extension value for recognized extensions
         _ => Asn1DerExtensionValue::Unrecognized
     };
@@ -1032,6 +1039,131 @@ pub fn parse_asn1_der_key_usage(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
         Asn1DerExtensionValue::KeyUsage {
             usage
         }
+    ))
+}
+
+// Parser for Subject Alternative Name
+pub fn parse_asn1_der_subject_alternative_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
+    let (_, mut names) = complete(
+        parse_asn1_der_sequence
+    )(bytes)?;
+
+    let mut general_names: Vec<Asn1DerGeneralName> = Vec::new();
+
+    while names.len() != 0 {
+        let (rest, (tag_val, _, name_value)) = parse_asn1_der_object(names)?;
+        match tag_val {
+            0x80 => {
+                let (_, seq) = complete(
+                    parse_asn1_der_sequence
+                )(name_value)?;
+                let (_, (oid, (inner_tag_val, _, value))) = complete(
+                    tuple((
+                        parse_asn1_der_oid,
+                        parse_asn1_der_object
+                    ))
+                )(seq)?;
+                if inner_tag_val != 0x80 {
+                    return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+                }
+                general_names.push(
+                    Asn1DerGeneralName::OtherName { type_id: oid, value }
+                );
+            },
+
+            0x81 => {
+                general_names.push(
+                    Asn1DerGeneralName::RFC822Name(name_value)
+                );
+            },
+
+            0x82 => {
+                general_names.push(
+                    Asn1DerGeneralName::DNSName(name_value)
+                );
+            },
+
+            0x83 => {
+                general_names.push(
+                    Asn1DerGeneralName::X400Address(name_value)
+                );
+            },
+
+            0x84 => {
+                general_names.push(
+                    Asn1DerGeneralName::DirectoryName(name_value)
+                );
+            },
+
+            0x85 => {
+                let (_, seq) = complete(
+                    parse_asn1_der_sequence
+                )(name_value)?;
+                let (_, (
+                    (name_assigner_tag_val, _, name_assigner),
+                    party_name
+                )) = complete(
+                    tuple((
+                        parse_asn1_der_object,
+                        opt(parse_asn1_der_object)
+                    ))
+                )(seq)?;
+
+                let general_name = if party_name.is_none() && name_assigner_tag_val == 0x81 {
+                    Asn1DerGeneralName::EDIPartyName {
+                        name_assigner: &[],
+                        party_name: name_assigner
+                    }
+                } else if party_name.is_some() && name_assigner_tag_val == 0x80 {
+                    if let Some((party_name_tag_val, _, party_name_value)) = party_name {
+                        if party_name_tag_val == 0x81 {
+                            Asn1DerGeneralName::EDIPartyName {
+                                name_assigner,
+                                party_name: party_name_value
+                            }
+                        }
+                        else {
+                            return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+                        }
+                    } else {
+                        return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+                    }
+                } else {
+                    return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+                };
+
+                general_names.push(
+                    general_name
+                );
+            },
+
+            0x86 => {
+                general_names.push(
+                    Asn1DerGeneralName::URI(name_value)
+                );
+            },
+            
+            0x87 => {
+                general_names.push(
+                    Asn1DerGeneralName::IPAddress(name_value)
+                );
+            },
+
+            0x88 => {
+                general_names.push(
+                    Asn1DerGeneralName::RegisteredID(name_value)
+                );
+            },
+
+            _ => return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+        }
+
+        names = rest;
+    }
+
+    Ok((
+        &[],
+        Asn1DerExtensionValue::SubjectAlternativeName { general_names }
     ))
 }
 

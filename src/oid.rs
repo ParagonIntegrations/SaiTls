@@ -72,6 +72,7 @@ pub const CERT_POLICIES:                &'static [u8] = &[85, 29, 32];          
 pub const CERT_BASIC_CONSTRAINTS:       &'static [u8] = &[85, 29, 19];                      // 2.5.29.19
 pub const CERT_EXT_KEY_USAGE:           &'static [u8] = &[85, 29, 37];                      // 2.5.29.37
 pub const CERT_INHIBIT_ANY_POLICY:      &'static [u8] = &[85, 29, 54];                      // 2.5.29.54
+pub const CERT_SUBJECTALTNAME:          &'static [u8] = &[85, 29, 17];                      // 2.5.29.17
 // Extended Key Extensions
 pub const ANY_EXTENDED_KEY_USAGE:       &'static [u8] = &[85, 29, 37, 0];                   // 2.5.29.37.0
 pub const ID_KP_SERVER_AUTH:            &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 1];         // 1.3.6.1.5.5.7.3.1
@@ -79,4 +80,4 @@ pub const ID_KP_CLIENT_AUTH:            &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 
 pub const ID_KP_CODE_SIGNING:           &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 3];         // 1.3.6.1.5.5.7.3.3
 pub const ID_KP_EMAIL_PROTECTION:       &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 4];         // 1.3.6.1.5.5.7.3.4
 pub const ID_KP_TIME_STAMPING:          &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 8];         // 1.3.6.1.5.5.7.3.8
-pub const ID_KP_OCSP_SIGNING:           &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 9];   
+pub const ID_KP_OCSP_SIGNING:           &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 9];
