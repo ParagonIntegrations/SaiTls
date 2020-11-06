@@ -178,6 +178,19 @@ impl<'a, 'b> HandshakeRepr<'a> {
         }
     }
 
+    pub(crate) fn get_all_asn1_der_certificates(&self) -> Result<Vec<&Asn1DerCertificate>, ()> {
+        if self.msg_type != HandshakeType::Certificate {
+            return Err(())
+        };
+        if let HandshakeData::Certificate(
+            cert
+        ) = &self.handshake_data {
+            Ok(cert.get_all_certificates())
+        } else {
+            Err(())
+        }
+    }
+
     pub(crate) fn get_signature(&self) -> Result<(SignatureScheme, &[u8]), ()> {
         if self.msg_type != HandshakeType::CertificateVerify {
             return Err(())
@@ -766,6 +779,14 @@ pub(crate) struct Certificate<'a> {
 impl<'a> Certificate<'a> {
     pub(crate) fn get_certificate(&self, index: usize) -> &Asn1DerCertificate {
         self.certificate_list[index].get_certificate()
+    }
+
+    pub(crate) fn get_all_certificates(&self) -> Vec<&Asn1DerCertificate> {
+        let mut certificate_vec = Vec::new();
+        for cert_entry in self.certificate_list.iter() {
+            certificate_vec.push(cert_entry.get_certificate())
+        }
+        certificate_vec
     }
 }
 

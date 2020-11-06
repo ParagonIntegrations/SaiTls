@@ -472,10 +472,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
 
                 // TODO: Replace this block after implementing a proper 
                 // certificate verification procdeure
-                // match validate_root_certificate(cert) {
-                //     Ok(true) => {},
-                //     _ => panic!("Certificate does not match")
-                // }
                 cert.validate_self_signed_signature().expect("Signature mismatched");
 
                 // Update session TLS state to WAIT_CV

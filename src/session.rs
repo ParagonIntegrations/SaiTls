@@ -1481,7 +1481,7 @@ impl Cipher {
     }
 }
 
-pub(crate) enum CertificatePublicKey {
+pub enum CertificatePublicKey {
     RSA {
         cert_rsa_public_key: RSAPublicKey
     },

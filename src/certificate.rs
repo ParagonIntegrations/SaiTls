@@ -224,6 +224,18 @@ impl<'a> Certificate<'a> {
     // Validate signature of self-signed certificate
     // Do not be confused with TLS Certificate Verify
     pub fn validate_self_signed_signature(&self) -> Result<(), TlsError> {
+        let cert_public_key = self.get_cert_public_key()
+            .map_err(|_| TlsError::SignatureValidationError)?;
+        self.validate_signature_with_trusted(&cert_public_key)
+    }
+
+    // Validate signature of certificate signed by some CA's public key
+    // Do not be confused with TLS Certificate Verify
+    pub fn validate_signature_with_trusted(
+        &self,
+        trusted_public_key: &CertificatePublicKey
+    ) -> Result<(), TlsError>
+    {
         let sig_alg = self.signature_algorithm.algorithm;
 
         // Prepare hash value
@@ -232,9 +244,7 @@ impl<'a> Certificate<'a> {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA1));
                 let hashed = Sha1::digest(self.tbs_certificate_encoded);
                 let sig = self.signature_value;
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_rsa_public_key()
+                trusted_public_key.get_rsa_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify(padding, &hashed, sig)
                     .map_err(|_| TlsError::SignatureValidationError)
@@ -244,9 +254,7 @@ impl<'a> Certificate<'a> {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_224));
                 let hashed = Sha224::digest(self.tbs_certificate_encoded);
                 let sig = self.signature_value;
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_rsa_public_key()
+                trusted_public_key.get_rsa_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify(padding, &hashed, sig)
                     .map_err(|_| TlsError::SignatureValidationError)
@@ -256,9 +264,7 @@ impl<'a> Certificate<'a> {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_256));
                 let hashed = Sha256::digest(self.tbs_certificate_encoded);
                 let sig = self.signature_value;
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_rsa_public_key()
+                trusted_public_key.get_rsa_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify(padding, &hashed, sig)
                     .map_err(|_| TlsError::SignatureValidationError)
@@ -268,9 +274,7 @@ impl<'a> Certificate<'a> {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_384));
                 let hashed = Sha384::digest(self.tbs_certificate_encoded);
                 let sig = self.signature_value;
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_rsa_public_key()
+                trusted_public_key.get_rsa_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify(padding, &hashed, sig)
                     .map_err(|_| TlsError::SignatureValidationError)
@@ -280,9 +284,7 @@ impl<'a> Certificate<'a> {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA2_512));
                 let hashed = Sha512::digest(self.tbs_certificate_encoded);
                 let sig = self.signature_value;
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_rsa_public_key()
+                trusted_public_key.get_rsa_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify(padding, &hashed, sig)
                     .map_err(|_| TlsError::SignatureValidationError)
@@ -300,9 +302,7 @@ impl<'a> Certificate<'a> {
                         );
                         let hashed = Sha1::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
-                        self.get_cert_public_key()
-                            .map_err(|_| TlsError::SignatureValidationError)?
-                            .get_rsa_public_key()
+                        trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
                             .map_err(|_| TlsError::SignatureValidationError)
@@ -315,9 +315,7 @@ impl<'a> Certificate<'a> {
                         );
                         let hashed = Sha224::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
-                        self.get_cert_public_key()
-                            .map_err(|_| TlsError::SignatureValidationError)?
-                            .get_rsa_public_key()
+                        trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
                             .map_err(|_| TlsError::SignatureValidationError)
@@ -330,9 +328,7 @@ impl<'a> Certificate<'a> {
                         );
                         let hashed = Sha256::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
-                        self.get_cert_public_key()
-                            .map_err(|_| TlsError::SignatureValidationError)?
-                            .get_rsa_public_key()
+                        trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
                             .map_err(|_| TlsError::SignatureValidationError)
@@ -345,9 +341,7 @@ impl<'a> Certificate<'a> {
                         );
                         let hashed = Sha384::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
-                        self.get_cert_public_key()
-                            .map_err(|_| TlsError::SignatureValidationError)?
-                            .get_rsa_public_key()
+                        trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
                             .map_err(|_| TlsError::SignatureValidationError)
@@ -360,9 +354,7 @@ impl<'a> Certificate<'a> {
                         );
                         let hashed = Sha512::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
-                        self.get_cert_public_key()
-                            .map_err(|_| TlsError::SignatureValidationError)?
-                            .get_rsa_public_key()
+                        trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
                             .map_err(|_| TlsError::SignatureValidationError)
@@ -379,9 +371,7 @@ impl<'a> Certificate<'a> {
                     .map_err(|_| TlsError::SignatureValidationError)?;
                 let sig = p256::ecdsa::Signature::from_asn1(self.signature_value)
                     .map_err(|_| TlsError::SignatureValidationError)?;
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_ecdsa_secp256r1_sha256_verify_key()
+                trusted_public_key.get_ecdsa_secp256r1_sha256_verify_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify(self.tbs_certificate_encoded, &sig)
                     .map_err(|_| TlsError::SignatureValidationError)
@@ -393,16 +383,13 @@ impl<'a> Certificate<'a> {
                     self.signature_value
                 ).map_err(|_| TlsError::SignatureValidationError)?;
                 log::info!("Ed25519 signature: {:?}", sig);
-                self.get_cert_public_key()
-                    .map_err(|_| TlsError::SignatureValidationError)?
-                    .get_ed25519_public_key()
+                trusted_public_key.get_ed25519_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify_strict(self.tbs_certificate_encoded, &sig)
                     .map_err(|_| TlsError::SignatureValidationError)
-            }
+            },
 
             _ => todo!()
         }
-
     }
 }
