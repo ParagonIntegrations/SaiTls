@@ -24,6 +24,8 @@ use crate::certificate::{
     ExtensionValue          as Asn1DerExtensionValue,
     PolicyInformation       as Asn1DerPolicyInformation,
     TBSCertificate          as Asn1DerTBSCertificate,
+    Name                    as Asn1DerName,
+    AttributeTypeAndValue   as Asn1DerAttribute,
 };
 
 use crate::oid;
@@ -656,9 +658,9 @@ pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerTBS
             opt(parse_asn1_der_version),
             parse_asn1_der_serial_number,
             parse_asn1_der_algorithm_identifier,
-            parse_asn1_der_sequence,
+            parse_asn1_der_name,
             parse_asn1_der_validity,
-            parse_asn1_der_sequence,
+            parse_asn1_der_name,
             parse_asn1_der_subject_key_public_info,
             opt(parse_asn1_der_bit_string),
             opt(parse_asn1_der_bit_string),
@@ -748,10 +750,21 @@ pub fn parse_asn1_der_boolean(bytes: &[u8]) -> IResult<&[u8], bool> {
 // SEQUENCE: tag: 0x30
 pub fn parse_asn1_der_sequence(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
-    // Verify the tag is indeed 0x03
+    // Verify the tag is indeed 0x30
     if tag_val != 0x30 {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
+    Ok((rest, value))
+}
+
+// SET: tag: 0x31
+pub fn parse_asn1_der_set(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
+    let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
+    // Verify the tag is indeed 0x31
+    if tag_val != 0x31 {
+        return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
+    }
+
     Ok((rest, value))
 }
 
@@ -770,8 +783,6 @@ pub fn parse_asn1_der_algorithm_identifier(bytes: &[u8]) -> IResult<&[u8], Asn1D
     }
     // Parse OID, leave the rest as optionl parameters
     let (optional_param, oid) = parse_asn1_der_oid(value)?;
-    log::info!("OID: {:X?}", oid);
-    log::info!("Optional parameter: {:X?}", optional_param);
 
     Ok((
         rest,
@@ -790,6 +801,55 @@ pub fn parse_asn1_der_oid(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
     Ok((rest, value))
+}
+
+// Parser for Name, applicable to issuer and subject field of TBS cert.
+pub fn parse_asn1_der_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerName> {
+    let (rest, mut rdn_sequence) = parse_asn1_der_sequence(bytes)?;
+    let mut attributes_vec: Vec<Asn1DerAttribute> = Vec::new();
+
+    while rdn_sequence.len() != 0 {
+        let (rem, attribute) = parse_asn1_der_attribute_type_and_value(
+            rdn_sequence
+        )?;
+        rdn_sequence = rem;
+        attributes_vec.push(attribute);
+    }
+
+    Ok((
+        rest,
+        Asn1DerName {
+            relative_distinguished_name: attributes_vec
+        }
+    ))
+}
+
+// Parser for AttributeTypeAndValue struct, typically wrapped inside Name struct
+pub fn parse_asn1_der_attribute_type_and_value(bytes: &[u8]) -> IResult<&[u8], Asn1DerAttribute> {
+    let (rest, set) = parse_asn1_der_set(bytes)?;
+    let (_, attribute) = complete(
+        parse_asn1_der_sequence
+    )(set)?;
+
+    let (_, (oid, (tag_val, _, value))) = complete(
+        tuple((
+            parse_asn1_der_oid,
+            parse_asn1_der_object
+        ))
+    )(attribute)?;
+
+    // Verify that tag_val is either "PrintableString or UTF8String"
+    if tag_val != 0x13 && tag_val != 0x0C {
+        return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+    }
+
+    Ok((
+        rest,
+        Asn1DerAttribute {
+            attribute_type: oid,
+            attribute_value: core::str::from_utf8(value).unwrap()
+        }
+    ))
 }
 
 // Parser for Time Validity Sequence Structure (0x30)

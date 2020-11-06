@@ -37,9 +37,9 @@ pub struct TBSCertificate<'a> {
     pub version: Version,
     pub serial_number: &'a [u8],
     pub signature: AlgorithmIdentifier<'a>,
-    pub issuer: &'a [u8],
+    pub issuer: Name<'a>,
     pub validity: Validity<'a>,
-    pub subject: &'a [u8],
+    pub subject: Name<'a>,
     pub subject_public_key_info: SubjectPublicKeyInfo<'a>,
     pub issuer_unique_id: Option<&'a [u8]>,
     pub subject_unique_id: Option<&'a [u8]>,
@@ -151,6 +151,17 @@ pub struct PolicyInformation<'a> {
 pub struct AlgorithmIdentifier<'a> {
     pub algorithm: &'a [u8],
     pub parameters: &'a [u8],
+}
+
+#[derive(Debug, Clone)]
+pub struct Name<'a> {
+    pub relative_distinguished_name: Vec<AttributeTypeAndValue<'a>>
+}
+
+#[derive(Debug, Clone)]
+pub struct AttributeTypeAndValue<'a> {
+    pub attribute_type: &'a [u8],       // OID
+    pub attribute_value: &'a str,
 }
 
 impl<'a> Certificate<'a> {
