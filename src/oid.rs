@@ -73,6 +73,7 @@ pub const CERT_BASIC_CONSTRAINTS:       &'static [u8] = &[85, 29, 19];          
 pub const CERT_EXT_KEY_USAGE:           &'static [u8] = &[85, 29, 37];                      // 2.5.29.37
 pub const CERT_INHIBIT_ANY_POLICY:      &'static [u8] = &[85, 29, 54];                      // 2.5.29.54
 pub const CERT_SUBJECTALTNAME:          &'static [u8] = &[85, 29, 17];                      // 2.5.29.17
+pub const CERT_NAME_CONSTRAINTS:        &'static [u8] = &[85, 29, 30];                      // 2.5.29.30
 // Extended Key Extensions
 pub const ANY_EXTENDED_KEY_USAGE:       &'static [u8] = &[85, 29, 37, 0];                   // 2.5.29.37.0
 pub const ID_KP_SERVER_AUTH:            &'static [u8] = &[43, 6, 1, 5, 5, 7, 3, 1];         // 1.3.6.1.5.5.7.3.1

@@ -105,7 +105,6 @@ pub enum ExtensionValue<'a> {
         info: Vec<PolicyInformation<'a>>
     },
 
-    // Permitted subtrees and excluded subtrees are not implemented
     SubjectAlternativeName {
         general_names: Vec<GeneralName<'a>>,
     },
@@ -115,8 +114,13 @@ pub enum ExtensionValue<'a> {
         path_len_constraint: Option<u8>,
     },
 
-    // Permitted subtrees and excluded subtrees are not implemented
-    // NameConstraints,
+    NameConstraints {
+        // Owns a list of acceptable/unacceptable GeneralNames
+        // Maximum field should not exist, minimum field is always 0
+        // Vector size of 0 equivalent to NIL
+        permitted_subtrees: Vec<GeneralName<'a>>,
+        excluded_subtrees: Vec<GeneralName<'a>>,
+    },
 
     // Policy mapping will not be supported
     // PolicyConstraints,

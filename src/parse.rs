@@ -952,6 +952,7 @@ pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensio
 
 // Parser for an extension (Sequence: 0x30)
 pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension> {
+    log::info!("Extension: {:X?}\n", bytes);
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x30
     if tag_val != 0x30 {
@@ -1004,6 +1005,12 @@ pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
             )(rem_ext_data)?;
             extension_value
         }
+        oid::CERT_NAME_CONSTRAINTS => {
+            let (_, extension_value) = complete(
+                parse_asn1_der_name_constraints
+            )(rem_ext_data)?;
+            extension_value
+        }
         // TODO: Parse extension value for recognized extensions
         _ => Asn1DerExtensionValue::Unrecognized
     };
@@ -1051,119 +1058,169 @@ pub fn parse_asn1_der_subject_alternative_name(bytes: &[u8]) -> IResult<&[u8], A
     let mut general_names: Vec<Asn1DerGeneralName> = Vec::new();
 
     while names.len() != 0 {
-        let (rest, (tag_val, _, name_value)) = parse_asn1_der_object(names)?;
-        match tag_val {
-            0x80 => {
-                let (_, seq) = complete(
-                    parse_asn1_der_sequence
-                )(name_value)?;
-                let (_, (oid, (inner_tag_val, _, value))) = complete(
-                    tuple((
-                        parse_asn1_der_oid,
-                        parse_asn1_der_object
-                    ))
-                )(seq)?;
-                if inner_tag_val != 0x80 {
-                    return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
-                }
-                general_names.push(
-                    Asn1DerGeneralName::OtherName { type_id: oid, value }
-                );
-            },
+        log::info!("Name bytes: {:X?}\nLength: {:?}\n", names, names.len());
+        let (rest, general_name) = parse_asn1_der_general_name(names)?;
 
-            0x81 => {
-                general_names.push(
-                    Asn1DerGeneralName::RFC822Name(name_value)
-                );
-            },
-
-            0x82 => {
-                general_names.push(
-                    Asn1DerGeneralName::DNSName(name_value)
-                );
-            },
-
-            0x83 => {
-                general_names.push(
-                    Asn1DerGeneralName::X400Address(name_value)
-                );
-            },
-
-            0x84 => {
-                general_names.push(
-                    Asn1DerGeneralName::DirectoryName(name_value)
-                );
-            },
-
-            0x85 => {
-                let (_, seq) = complete(
-                    parse_asn1_der_sequence
-                )(name_value)?;
-                let (_, (
-                    (name_assigner_tag_val, _, name_assigner),
-                    party_name
-                )) = complete(
-                    tuple((
-                        parse_asn1_der_object,
-                        opt(parse_asn1_der_object)
-                    ))
-                )(seq)?;
-
-                let general_name = if party_name.is_none() && name_assigner_tag_val == 0x81 {
-                    Asn1DerGeneralName::EDIPartyName {
-                        name_assigner: &[],
-                        party_name: name_assigner
-                    }
-                } else if party_name.is_some() && name_assigner_tag_val == 0x80 {
-                    if let Some((party_name_tag_val, _, party_name_value)) = party_name {
-                        if party_name_tag_val == 0x81 {
-                            Asn1DerGeneralName::EDIPartyName {
-                                name_assigner,
-                                party_name: party_name_value
-                            }
-                        }
-                        else {
-                            return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
-                        }
-                    } else {
-                        return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
-                    }
-                } else {
-                    return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
-                };
-
-                general_names.push(
-                    general_name
-                );
-            },
-
-            0x86 => {
-                general_names.push(
-                    Asn1DerGeneralName::URI(name_value)
-                );
-            },
-            
-            0x87 => {
-                general_names.push(
-                    Asn1DerGeneralName::IPAddress(name_value)
-                );
-            },
-
-            0x88 => {
-                general_names.push(
-                    Asn1DerGeneralName::RegisteredID(name_value)
-                );
-            },
-
-            _ => return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
-        }
-
+        general_names.push(general_name);
         names = rest;
     }
 
     Ok((
         &[],
         Asn1DerExtensionValue::SubjectAlternativeName { general_names }
+    ))
+}
+
+// Parser for GeneralName
+pub fn parse_asn1_der_general_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerGeneralName> {
+    let (rest, (tag_val, _, name_value)) = parse_asn1_der_object(bytes)?;
+    let general_name = match tag_val {
+        0xA0 => {   // Constructed type, contains type-id and value
+            let (_, (oid, (inner_tag_val, _, value))) = complete(
+                tuple((
+                    parse_asn1_der_oid,
+                    parse_asn1_der_object
+                ))
+            )(name_value)?;
+            if inner_tag_val != 0xA0 {
+                return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
+            }
+            log::info!("Parsed inner tag");
+            // Further parse the value into an ASN.1 DER object
+            let (_, (_, _, name_value)) = complete(
+                parse_asn1_der_object
+            )(value)?;
+            Asn1DerGeneralName::OtherName { type_id: oid, value: name_value }
+        },
+
+        0x81 => {
+            Asn1DerGeneralName::RFC822Name(name_value)
+        },
+
+        0x82 => {
+            Asn1DerGeneralName::DNSName(name_value)
+        },
+
+        0x83 => {
+            Asn1DerGeneralName::X400Address(name_value)
+        },
+
+        0x84 => {
+            Asn1DerGeneralName::DirectoryName(name_value)
+        },
+
+        0xA5 => {
+            let (_, (
+                (name_assigner_tag_val, _, name_assigner),
+                party_name
+            )) = complete(
+                tuple((
+                    parse_asn1_der_object,
+                    opt(parse_asn1_der_object)
+                ))
+            )(name_value)?;
+
+            let general_name = if party_name.is_none() && name_assigner_tag_val == 0x81 {
+                Asn1DerGeneralName::EDIPartyName {
+                    name_assigner: &[],
+                    party_name: name_assigner
+                }
+            } else if party_name.is_some() && name_assigner_tag_val == 0x80 {
+                if let Some((party_name_tag_val, _, party_name_value)) = party_name {
+                    if party_name_tag_val == 0x81 {
+                        Asn1DerGeneralName::EDIPartyName {
+                            name_assigner,
+                            party_name: party_name_value
+                        }
+                    }
+                    else {
+                        return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+                    }
+                } else {
+                    return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+                }
+            } else {
+                return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+            };
+
+            general_name
+        },
+
+        0x86 => {
+            Asn1DerGeneralName::URI(name_value)
+        },
+        
+        0x87 => {
+            Asn1DerGeneralName::IPAddress(name_value)
+        },
+
+        0x88 => {
+            Asn1DerGeneralName::RegisteredID(name_value)
+        },
+
+        _ => return Err(nom::Err::Error((bytes, ErrorKind::Verify)))
+    };
+
+    Ok((rest, general_name))
+}
+
+// Parser for Name Constraints
+pub fn parse_asn1_der_name_constraints(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
+    let (_, subtrees) = complete(
+        parse_asn1_der_sequence
+    )(bytes)?;
+
+    // Init name constraint extension
+    let mut permitted_subtrees = Vec::new();
+    let mut excluded_subtrees = Vec::new();
+
+    let (other_subtree, (mut tag_val, _, mut subtree)) = parse_asn1_der_object(subtrees)?;
+
+    if tag_val == 0xA0 {
+        while subtree.len() != 0 {
+            let (rest, permitted_names) = parse_asn1_der_sequence(subtree)?;
+
+            // Ignore the `minimum` field and `maximum` field
+            // Simpily reject any certificate with these 2 field could be a solution
+            let (_, general_name) = parse_asn1_der_general_name(permitted_names)?;
+            permitted_subtrees.push(general_name);
+            subtree = rest;
+        }
+
+        // Move on to the excluded subtrees, or exit the procedure
+        if other_subtree.len() == 0 {
+            return Ok((
+                &[],
+                Asn1DerExtensionValue::NameConstraints {
+                    permitted_subtrees,
+                    excluded_subtrees
+                }
+            ))
+        } else {
+            let (_, (second_tag_val, _, second_subtree)) = complete(parse_asn1_der_object)(other_subtree)?;
+            tag_val = second_tag_val;
+            subtree = second_subtree;
+        }
+    }
+
+    if tag_val == 0xA1 {
+        while subtree.len() != 0 {
+            let (rest, excluded_names) = parse_asn1_der_sequence(subtree)?;
+
+            // Ignore the `minimum` field and `maximum` field
+            // Simpily reject any certificate with these 2 field could be a solution
+            let (_, general_name) = parse_asn1_der_general_name(excluded_names)?;
+            excluded_subtrees.push(general_name);
+            subtree = rest;
+        }
+    }
+
+    return Ok((
+        &[],
+        Asn1DerExtensionValue::NameConstraints {
+            permitted_subtrees,
+            excluded_subtrees
+        }
     ))
 }
 
