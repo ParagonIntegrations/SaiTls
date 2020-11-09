@@ -3,6 +3,8 @@ use num_enum::TryFromPrimitive;
 
 use generic_array::GenericArray;
 
+use chrono::{DateTime, FixedOffset};
+
 use crate::parse::parse_asn1_der_rsa_public_key;
 use crate::parse::parse_rsa_ssa_pss_parameters;
 use crate::parse::parse_ecdsa_signature;
@@ -38,7 +40,7 @@ pub struct TBSCertificate<'a> {
     pub serial_number: &'a [u8],
     pub signature: AlgorithmIdentifier<'a>,
     pub issuer: Name<'a>,
-    pub validity: Validity<'a>,
+    pub validity: Validity,
     pub subject: Name<'a>,
     pub subject_public_key_info: SubjectPublicKeyInfo<'a>,
     pub issuer_unique_id: Option<&'a [u8]>,
@@ -57,9 +59,9 @@ pub enum Version {
 }
 
 #[derive(Debug, Clone)]
-pub struct Validity<'a> {
-    pub not_before: Time<'a>,
-    pub not_after: Time<'a>,
+pub struct Validity {
+    pub not_before: DateTime<FixedOffset>,
+    pub not_after: DateTime<FixedOffset>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,12 +120,19 @@ pub enum ExtensionValue<'a> {
         // Owns a list of acceptable/unacceptable GeneralNames
         // Maximum field should not exist, minimum field is always 0
         // Vector size of 0 equivalent to NIL
+        // While it doesn't make sense to have both subtrees,
+        // the RFC (RFC 5280) mandated that any subtree stated in
+        // excluded subtree cannot be permitted, even if it is part of
+        // the permitted subtree.
+        // It is probably intentional to have OPTIONAL over CHOICE
         permitted_subtrees: Vec<GeneralName<'a>>,
         excluded_subtrees: Vec<GeneralName<'a>>,
     },
 
-    // Policy mapping will not be supported
-    // PolicyConstraints,
+    PolicyConstraints {
+        require_explicit_policy: Option<u8>,
+        inhibit_policy_mapping: Option<u8>,
+    },
 
     ExtendedKeyUsage {
         // A list of all possible extended key usage in OID

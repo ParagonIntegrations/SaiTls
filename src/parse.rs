@@ -7,6 +7,11 @@ use nom::combinator::opt;
 use nom::sequence::preceded;
 use nom::sequence::tuple;
 use nom::error::ErrorKind;
+use nom::character::complete::digit0;
+use nom::character::is_digit;
+
+use chrono::{DateTime, FixedOffset, TimeZone};
+use heapless::{String, consts::*};
 
 use byteorder::{ByteOrder, NetworkEndian};
 
@@ -26,7 +31,7 @@ use crate::certificate::{
     TBSCertificate          as Asn1DerTBSCertificate,
     Name                    as Asn1DerName,
     AttributeTypeAndValue   as Asn1DerAttribute,
-    GeneralName             as Asn1DerGeneralName
+    GeneralName             as Asn1DerGeneralName,
 };
 
 use crate::oid;
@@ -876,24 +881,119 @@ pub fn parse_asn1_der_validity(bytes: &[u8]) -> IResult<&[u8], Asn1DerValidity> 
 }
 
 // Parser for Time Representation (0x17: UTCTime, 0x18: GeneralizedTime)
-pub fn parse_ans1_der_time(bytes: &[u8]) -> IResult<&[u8], Asn1DerTime> {
+pub fn parse_ans1_der_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>> {
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Handle UTCTime, Gen.Time and Invalid Tag values
     match tag_val {
         0x17 => {
+            let (_, date_time) = complete(
+                parse_asn1_der_utc_time
+            )(value)?;
             Ok((
                 rest,
-                Asn1DerTime::UTCTime(value)
+                date_time
             ))
         },
         0x18 => {
+            // TODO: Not implemented
+            let (_, date_time) = complete(
+                parse_asn1_der_generalized_time
+            )(value)?;
             Ok((
                 rest,
-                Asn1DerTime::GeneralizedTime(value)
+                date_time
             ))
         },
         _ => Err(nom::Err::Failure((&[], ErrorKind::Verify)))
     }
+}
+
+// Parser for UTCTime
+pub fn parse_asn1_der_utc_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>> {
+
+    // Buffer for building string
+    let mut string: String<U19> = String::new();
+
+    // Decide the appropriate century (1950 to 2049)
+    let year_tag: u8 = core::str::from_utf8(&bytes[..2]).unwrap().parse().unwrap();
+    if year_tag < 50 {
+        string.push_str("20");
+    } else {
+        string.push_str("19");
+    }
+
+    // Take out YYMMDDhhmm first
+    let (rest, first_part) = take(10_usize)(bytes)?;
+    string.push_str(core::str::from_utf8(first_part).unwrap()).unwrap();
+    let (rest, _) = if u8::is_ascii_digit(&rest[0]) {
+        let (rest, seconds) = take(2_usize)(rest)?;
+        string.push_str(core::str::from_utf8(seconds).unwrap()).unwrap();
+        (rest, seconds)
+    } else {
+        string.push_str("00").unwrap();
+        // The second parameter will not be used anymore
+        (rest, rest)
+    };
+    match rest[0] as char {
+        'Z' => {
+            string.push_str("+0000")
+        },
+        _ => {
+            string.push_str(core::str::from_utf8(rest).unwrap())
+        }
+    };
+
+    Ok((
+        &[],
+        DateTime::parse_from_str(
+            &string, "%Y%m%d%H%M%S%z"
+        ).unwrap()
+    ))
+}
+
+// Parser for GeneralizedTime
+pub fn parse_asn1_der_generalized_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>> {
+
+    // Buffer for building string
+    let mut string: String<U23> = String::new();
+
+    // Find the first non-digit byte
+    let mut first_non_digit_index = 0;
+    while first_non_digit_index < bytes.len() {
+        if !u8::is_ascii_digit(&bytes[first_non_digit_index]) {
+            break;
+        }
+        first_non_digit_index += 1;
+    }
+
+    string.push_str(core::str::from_utf8(
+        &bytes[..first_non_digit_index]).unwrap()
+    ).unwrap();
+
+    match first_non_digit_index {
+        10 => string.push_str("0000.000").unwrap(),
+        12 => string.push_str("00.000").unwrap(),
+        14 => string.push_str(".000").unwrap(),
+        18 => {},
+        _ => return Err(nom::Err::Failure((&[], ErrorKind::Verify)))
+    };
+
+    match bytes.len() - first_non_digit_index {
+        // Local time, without relative time diff to UTC time
+        // Assume UTC
+        0 | 1 => string.push_str("+0000").unwrap(),
+        5 => string.push_str(core::str::from_utf8(
+            &bytes[first_non_digit_index..]).unwrap()
+        ).unwrap(),
+        _ => return Err(nom::Err::Failure((&[], ErrorKind::Verify)))
+    };
+
+    Ok((
+        &[],
+        DateTime::parse_from_str(
+            &string, "%Y%m%d%H%M%S%.3f%z"
+        ).unwrap()
+    ))
 }
 
 // Parser for SubjectKeyPublicInfo (Sequence: 0x30)
@@ -1004,10 +1104,16 @@ pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension
                 parse_asn1_der_subject_alternative_name
             )(rem_ext_data)?;
             extension_value
-        }
+        },
         oid::CERT_NAME_CONSTRAINTS => {
             let (_, extension_value) = complete(
                 parse_asn1_der_name_constraints
+            )(rem_ext_data)?;
+            extension_value
+        },
+        oid::CERT_POLICY_CONSTRAINTS => {
+            let (_, extension_value) = complete(
+                parse_asn1_der_policy_constraints
             )(rem_ext_data)?;
             extension_value
         }
@@ -1220,6 +1326,63 @@ pub fn parse_asn1_der_name_constraints(bytes: &[u8]) -> IResult<&[u8], Asn1DerEx
         Asn1DerExtensionValue::NameConstraints {
             permitted_subtrees,
             excluded_subtrees
+        }
+    ))
+}
+
+// Parser for policy constraints
+pub fn parse_asn1_der_policy_constraints(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensionValue> {
+    // Strip sequence
+    let (_, constraint_seq) = complete(
+        parse_asn1_der_sequence
+    )(bytes)?;
+
+    // Init policy constraints
+    let mut require_explicit_policy = None;
+    let mut inhibit_policy_mapping = None;
+
+    let (rest, (mut tag_val, _, mut policy)) = parse_asn1_der_object(constraint_seq)?;
+    if tag_val == 0x80 {
+        let temp = if policy.len() > 1 {
+            // The maximum acceptable cert chain length would probably be less than 10
+            128
+        } else {
+            policy[0]
+        };
+        require_explicit_policy.replace(temp);
+
+        if rest.len() == 0 {
+            return Ok((
+                &[],
+                Asn1DerExtensionValue::PolicyConstraints {
+                    require_explicit_policy,
+                    inhibit_policy_mapping
+                }
+            ))
+        }
+
+        let (_, (second_tag_val, _, second_policy)) = complete(
+            parse_asn1_der_object
+        )(rest)?;
+        tag_val = second_tag_val;
+        policy = second_policy;
+    }
+
+    if tag_val == 0x81 {
+        let temp = if policy.len() > 1 {
+            // The maximum acceptable cert chain length would probably be less than 10
+            128
+        } else {
+            policy[0]
+        };
+        inhibit_policy_mapping.replace(temp);
+    }
+
+    Ok((
+        &[],
+        Asn1DerExtensionValue::PolicyConstraints {
+            require_explicit_policy,
+            inhibit_policy_mapping
         }
     ))
 }
