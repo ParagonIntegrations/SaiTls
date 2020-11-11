@@ -595,7 +595,7 @@ pub(crate) struct Cookie {
 #[allow(non_camel_case_types)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
-pub(crate) enum SignatureScheme {
+pub enum SignatureScheme {
     /* RSASSA-PKCS1-v1_5 algorithms */
     rsa_pkcs1_sha256 = 0x0401,
     rsa_pkcs1_sha384 = 0x0501,

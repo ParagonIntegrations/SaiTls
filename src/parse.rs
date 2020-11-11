@@ -1419,12 +1419,7 @@ pub fn parse_asn1_der_policy_information(bytes: &[u8]) -> IResult<&[u8], Asn1Der
         return Err(nom::Err::Failure((&[], ErrorKind::Verify)));
     }
 
-    let (_, (oid, (_, _, qualifier))) = complete(
-        tuple((
-            parse_asn1_der_oid,
-            parse_asn1_der_object
-        ))
-    )(value)?;
+    let (qualifier, oid) = parse_asn1_der_oid(value)?;
 
     Ok((
         rest,

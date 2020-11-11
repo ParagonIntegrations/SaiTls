@@ -22,4 +22,10 @@ pub enum Error {
     DecryptionError,
     CapacityError,
     SignatureValidationError,
+    TimeValidityError,
+    CertificateIssuerMismatch,
+    CertificateSubjectNotPermitted,
+    CertificateSubjectExcluded,
+    CertificatePolicyError,
+    CertificateVersionError,
 }
