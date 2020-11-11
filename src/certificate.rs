@@ -328,7 +328,7 @@ pub struct AlgorithmIdentifier<'a> {
 
 #[derive(Debug, Clone)]
 pub struct Name<'a> {
-    pub relative_distinguished_name: Vec<AttributeTypeAndValue<'a>>
+    pub relative_distinguished_name: Vec<RelativeDistinguishedName<'a>>
 }
 
 impl<'a> PartialEq for Name<'a> {
@@ -342,6 +342,11 @@ impl<'a> PartialEq for Name<'a> {
         }
         true
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelativeDistinguishedName<'a> {
+    pub type_and_attributes: Vec<AttributeTypeAndValue<'a>>
 }
 
 #[derive(Debug, Clone, PartialEq)]

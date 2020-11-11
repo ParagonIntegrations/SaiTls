@@ -18,20 +18,21 @@ use byteorder::{ByteOrder, NetworkEndian};
 use crate::tls_packet::*;
 
 use crate::certificate::{
-    Certificate             as Asn1DerCertificate,
-    Version                 as Asn1DerVersion,
-    AlgorithmIdentifier     as Asn1DerAlgId,
-    Time                    as Asn1DerTime,
-    Validity                as Asn1DerValidity,
-    SubjectPublicKeyInfo    as Asn1DerSubjectPublicKeyInfo,
-    Extensions              as Asn1DerExtensions,
-    Extension               as Asn1DerExtension,
-    ExtensionValue          as Asn1DerExtensionValue,
-    PolicyInformation       as Asn1DerPolicyInformation,
-    TBSCertificate          as Asn1DerTBSCertificate,
-    Name                    as Asn1DerName,
-    AttributeTypeAndValue   as Asn1DerAttribute,
-    GeneralName             as Asn1DerGeneralName,
+    Certificate                 as Asn1DerCertificate,
+    Version                     as Asn1DerVersion,
+    AlgorithmIdentifier         as Asn1DerAlgId,
+    Time                        as Asn1DerTime,
+    Validity                    as Asn1DerValidity,
+    SubjectPublicKeyInfo        as Asn1DerSubjectPublicKeyInfo,
+    Extensions                  as Asn1DerExtensions,
+    Extension                   as Asn1DerExtension,
+    ExtensionValue              as Asn1DerExtensionValue,
+    PolicyInformation           as Asn1DerPolicyInformation,
+    TBSCertificate              as Asn1DerTBSCertificate,
+    Name                        as Asn1DerName,
+    AttributeTypeAndValue       as Asn1DerAttribute,
+    GeneralName                 as Asn1DerGeneralName,
+    RelativeDistinguishedName   as Asn1DerRDN,
 };
 
 use crate::oid;
@@ -812,10 +813,10 @@ pub fn parse_asn1_der_oid(bytes: &[u8]) -> IResult<&[u8], &[u8]> {
 // Parser for Name, applicable to issuer and subject field of TBS cert.
 pub fn parse_asn1_der_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerName> {
     let (rest, mut rdn_sequence) = parse_asn1_der_sequence(bytes)?;
-    let mut attributes_vec: Vec<Asn1DerAttribute> = Vec::new();
+    let mut attributes_vec: Vec<Asn1DerRDN> = Vec::new();
 
     while rdn_sequence.len() != 0 {
-        let (rem, attribute) = parse_asn1_der_attribute_type_and_value(
+        let (rem, attribute) = parse_asn1_der_relative_distinguished_name(
             rdn_sequence
         )?;
         rdn_sequence = rem;
@@ -830,19 +831,37 @@ pub fn parse_asn1_der_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerName> {
     ))
 }
 
+// Parser for Relative Distinguished Name (RDN)
+pub fn parse_asn1_der_relative_distinguished_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerRDN> {
+    let (rest, mut attribute_set) = parse_asn1_der_set(bytes)?;
+    let mut attributes_vec: Vec<Asn1DerAttribute> = Vec::new();
+
+    while attribute_set.len() != 0 {
+        let (rem, attribute) = parse_asn1_der_attribute_type_and_value(
+            attribute_set
+        )?;
+        attribute_set = rem;
+        attributes_vec.push(attribute);
+    }
+
+    Ok((
+        rest,
+        Asn1DerRDN {
+            type_and_attributes: attributes_vec
+        }
+    ))
+}
+
 // Parser for AttributeTypeAndValue struct, typically wrapped inside Name struct
 pub fn parse_asn1_der_attribute_type_and_value(bytes: &[u8]) -> IResult<&[u8], Asn1DerAttribute> {
-    let (rest, set) = parse_asn1_der_set(bytes)?;
-    let (_, attribute) = complete(
-        parse_asn1_der_sequence
-    )(set)?;
+    let (rest, set) = parse_asn1_der_sequence(bytes)?;
 
     let (_, (oid, (tag_val, _, value))) = complete(
         tuple((
             parse_asn1_der_oid,
             parse_asn1_der_object
         ))
-    )(attribute)?;
+    )(set)?;
 
     // Verify that tag_val is either "PrintableString or UTF8String"
     if tag_val != 0x13 && tag_val != 0x0C {
