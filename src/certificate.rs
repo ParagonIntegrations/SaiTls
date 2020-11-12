@@ -1960,12 +1960,6 @@ mod test {
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
     );
-    // const CIDR_IPv6_3: GeneralName = GeneralName::IPAddress(
-    //     &[192, 200, 100, 0, 255, 255, 252, 0]
-    // );
-    // const CIDR_IPv6_4: GeneralName = GeneralName::IPAddress(
-    //     &[200, 200, 100, 0, 255, 255, 255, 0]
-    // );
 
     /*
      *  Heterogeneous IP intersection/union
@@ -1983,7 +1977,70 @@ mod test {
         let mut expected_subtrees: Vec<GeneralName> = Vec::new();
         expected_subtrees.push(CIDR_IPv6_1);
         expected_subtrees.push(CIDR_IPv4_7);
+        // Intersection among heterogeneous names should not affect their span
         get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    #[test]
+    fn test_ipv4_ipv6_mix_union() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv6_1);
+        state_subtrees.push(CIDR_IPv6_2);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_7);
+        cert_subtrees.push(CIDR_IPv4_6);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv6_1);
+        expected_subtrees.push(CIDR_IPv4_7);
+        // Union among heterogeneous names should not affect their span
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    // Cross intersecting/union
+    #[test]
+    fn test_ipv4_ipv6_cross_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv6_1);
+        state_subtrees.push(CIDR_IPv4_7);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv6_2);
+        cert_subtrees.push(CIDR_IPv4_6);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv6_2);
+        expected_subtrees.push(CIDR_IPv4_6);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    #[test]
+    fn test_ipv4_ipv6_cross_union() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv6_1);
+        state_subtrees.push(CIDR_IPv4_7);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv6_2);
+        cert_subtrees.push(CIDR_IPv4_6);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv6_1);
+        expected_subtrees.push(CIDR_IPv4_7);
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
         assert_eq!(
             state_subtrees,
             expected_subtrees
