@@ -1231,7 +1231,10 @@ pub fn parse_asn1_der_general_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerGenera
         },
 
         0x84 => {
-            Asn1DerGeneralName::DirectoryName(name_value)
+            let (_, name) = complete(
+                parse_asn1_der_name
+            )(name_value)?;
+            Asn1DerGeneralName::DirectoryName(name)
         },
 
         0xA5 => {

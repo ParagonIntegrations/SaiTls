@@ -170,7 +170,7 @@ pub enum ExtensionValue<'a> {
 
 // Embedded value might be empty (&[])
 // This means a reject-all/accept-none condition
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum GeneralName<'a> {
     OtherName {
         type_id: &'a [u8],
@@ -179,7 +179,7 @@ pub enum GeneralName<'a> {
     RFC822Name(&'a [u8]),
     DNSName(&'a [u8]),
     X400Address(&'a [u8]),
-    DirectoryName(&'a [u8]),
+    DirectoryName(Name<'a>),
     EDIPartyName{
         name_assigner: &'a [u8],
         party_name: &'a [u8],
@@ -193,11 +193,13 @@ pub enum GeneralName<'a> {
 // Will not handle `OtherName`, `X400Address`, `EDIPartyName`, `RegisteredID`,
 // as these restrictions of these variants are not suggested
 impl<'a> GeneralName<'a> {
-    
     pub fn is_subset_of(&self, other: &Self) -> bool {
         match (self, other) {
             // Special case: empty set
             // Empty set is a subset of everything
+            // The caveat is that Empty set represents the wild card
+            // Which means everything is part of the empty set
+            // This behavior is represented in the `belongs_to()` method
             (Self::URI(self_uri), Self::URI(other_uri)) => {
                 if self_uri.len() == 0 || other_uri.len() == 0 {
                     self_uri.len() == 0
@@ -301,6 +303,72 @@ impl<'a> GeneralName<'a> {
         }
     }
 
+    // See if a specific name is part of the subtree
+    // The subtle difference between determining subset and ownership is the empty set
+    // Recall:
+    // - Empty set is a subset of everything, intersection between 2 disjoint set is an empty set
+    // - Empty set is also a wildcard, everything fits in a restriction with empty set
+    //
+    // IP address in SAN only includes the IP part, without network mask
+    // This method is to make sure that IPv4 and IPv6 address can compare with
+    // their corresponding CIDR address (i.e. 192.168.0.1 belongs to 192.168.0.0/24 network)
+    pub fn belongs_to(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::URI(self_uri), Self::URI(other_uri)) => {
+                self_uri.ends_with(other_uri)
+            }
+            (Self::RFC822Name(..), Self::RFC822Name(..))
+            | (Self::DNSName(..), Self::DNSName(..)) => {
+                self.is_subset_of(other)
+            },
+
+            (Self::IPAddress(san_ip), Self::IPAddress(cidr_network)) => {
+                // Use smoltcp API to covert into IPv4/Ipv6 address/CIDR
+                match (san_ip.len(), cidr_network.len()) {
+                    // Wildcard case: CIDR is empty
+                    // Everything fits into an empty set
+                    (_, 0) => true,
+
+                    // IPv4 case
+                    (4, 8) => {
+                        let ipv4_san_addr = smoltcp::wire::Ipv4Address::from_bytes(san_ip);
+                        let ipv4_cidr = smoltcp::wire::Ipv4Cidr::from_netmask(
+                            smoltcp::wire::Ipv4Address::from_bytes(
+                                &cidr_network[0..4]
+                            ),
+                            smoltcp::wire::Ipv4Address::from_bytes(
+                                &cidr_network[4..]
+                            ),
+                        ).unwrap();
+                        ipv4_cidr.contains_addr(&ipv4_san_addr)
+                    },
+
+                    // IPv6 case
+                    (16, 32) => {
+                        let ipv6_san_addr = smoltcp::wire::Ipv6Address::from_bytes(san_ip);
+                        let mut prefix_len = 0;
+                        for index in 16..32 {
+                            prefix_len += cidr_network[index].count_ones();
+                        }
+                        let ipv6_cidr = smoltcp::wire::Ipv6Cidr::new(
+                            smoltcp::wire::Ipv6Address::from_bytes(
+                                &cidr_network[0..16]
+                            ),
+                            prefix_len.try_into().unwrap()
+                        );
+                        ipv6_cidr.contains_addr(&ipv6_san_addr)
+                    },
+
+                    // Malformatted IP address/CIDR
+                    _ => false,
+                }
+            },
+
+            // Unsupported variant/heterogeneous comparison
+            _ => false,
+        }
+    }
+
     pub fn is_same_variant(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::URI(..), Self::URI(..))
@@ -326,9 +394,30 @@ pub struct AlgorithmIdentifier<'a> {
     pub parameters: &'a [u8],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq)]
 pub struct Name<'a> {
     pub relative_distinguished_name: Vec<RelativeDistinguishedName<'a>>
+}
+
+impl<'a> Name<'a> {
+    pub fn belongs_to(&self, other: &Self) -> bool {
+        if self.relative_distinguished_name.len()
+            < other.relative_distinguished_name.len()
+        {
+            false
+        } else {
+            // For each RDN in other, self must have the same RDN
+            // then self is within the subtree of other
+            for other_rdn in other.relative_distinguished_name.iter() {
+                if self.relative_distinguished_name.iter().find(
+                    |&self_rdn| self_rdn == other_rdn
+                ).is_none() {
+                    return false;
+                }
+            }
+            true
+        }
+    }
 }
 
 impl<'a> PartialEq for Name<'a> {
@@ -344,12 +433,12 @@ impl<'a> PartialEq for Name<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RelativeDistinguishedName<'a> {
     pub type_and_attributes: Vec<AttributeTypeAndValue<'a>>
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AttributeTypeAndValue<'a> {
     pub attribute_type: &'a [u8],       // OID
     pub attribute_value: &'a str,
@@ -667,47 +756,138 @@ pub fn verify_certificate_chain(
             return Err(TlsError::CertificateIssuerMismatch);
         }
 
+        // (b, c) If certificate is self-issued and not the end-entity certificate,
+        // verify that subject name is
+        // - within one of the permitted subtrees
+        // - not within any of the excluded subtrees
+        //
+        // and verify that each subjectAltName is
+        // - within one of the permitted_subtrees for that type
+        // - not within any of the excluded_subtrees for that name type
         if current_certificate.tbs_certificate.issuer != current_certificate.tbs_certificate.subject
             && (cert_index + 1) != certificates.len() {
 
-            if permitted_subtrees.len() != 0 {
-                // Find the SAN extension
+            /*
+             * Permitted subtreee block
+             */
+            {
+                // Check if there are permitted name, and find any matching name
+                let mut has_dir_name_restriction = false;
+                let mut has_rfc_822_name_restriction = false;
+                let mut has_dns_name_restriction = false;
+                let mut has_uri_restriction = false;
+                let mut has_ip_address_restriction = false;
+                let mut subject_name_permitted = false;
+                for permitted_dir_name in permitted_subtrees.iter() {
+                    match permitted_dir_name {
+                        GeneralName::DirectoryName(dir_name) => {
+                            has_dir_name_restriction = true;
+                            if current_certificate.tbs_certificate.subject
+                                .belongs_to(dir_name)
+                            {
+                                subject_name_permitted = true;
+                            }                  
+                        },
+                        GeneralName::RFC822Name(..) => {
+                            has_rfc_822_name_restriction = true;
+                        },
+                        GeneralName::DNSName(..) => {
+                            has_dns_name_restriction = true;
+                        },
+                        GeneralName::URI(..) => {
+                            has_uri_restriction = true;
+                        },
+                        GeneralName::IPAddress(..) => {
+                            has_ip_address_restriction = true;
+                        },
+                        _ => {}
+                    }
+                }
+
+                // If there are restrictions in terms of permitted_subtrees,
+                // while subject cannot fulfill it, reject certificate
+                if has_dir_name_restriction && !subject_name_permitted {
+                    return Err(TlsError::CertificateSubjectNotPermitted)
+                }
+
                 for extension in current_certificate.tbs_certificate
-                    .extensions.extensions.iter() {
+                    .extensions.extensions.iter()
+                {
                     if let ExtensionValue::SubjectAlternativeName {
                         general_names
                     } = &extension.extension_value {
                         // For each alt. names in SAN, it is within one of the
                         // permitted_subtrees for that name type
-                        // TODO: Do more than find exact match
-                        for general_name in general_names.iter() {
-                            permitted_subtrees.iter().find(
-                                |&permitted_name| permitted_name == general_name
-                            ).ok_or(
-                                TlsError::CertificateSubjectNotPermitted
-                            )?;
+                        for san_general_name in general_names.iter() {
+                            if permitted_subtrees.iter().find(
+                                |&permitted_name| {
+                                    // Either the general name are identical
+                                    // (for names that does not support subset operation subset),
+                                    // Or it belongs to a subtree
+                                    permitted_name == san_general_name ||
+                                    san_general_name.belongs_to(permitted_name)
+                                }
+                            ).is_none() {
+                                match san_general_name {
+                                    GeneralName::RFC822Name(..) => if has_rfc_822_name_restriction {
+                                        return Err(TlsError::CertificateSubjectNotPermitted)
+                                    },
+                                    GeneralName::DNSName(..) => if has_dns_name_restriction {
+                                        return Err(TlsError::CertificateSubjectNotPermitted)
+                                    },
+                                    GeneralName::URI(..) => if has_uri_restriction {
+                                        return Err(TlsError::CertificateSubjectNotPermitted)
+                                    },
+                                    GeneralName::IPAddress(..) => if has_ip_address_restriction {
+                                        return Err(TlsError::CertificateSubjectNotPermitted)
+                                    },
+
+                                    // Other types of restrictions are not recognized
+                                    _ => {},
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            if excluded_subtrees.len() != 0 {
-                // Find the SAN extension
+            /*
+             * Excluded subtrees block
+             */
+            {
+                // Check if there are excluded name, and find any matching name
+                for excluded_dir_name in excluded_subtrees.iter() {
+                    match excluded_dir_name {
+                        GeneralName::DirectoryName(dir_name) => {
+                            if current_certificate.tbs_certificate.subject
+                                .belongs_to(dir_name)
+                            {
+                                return Err(TlsError::CertificateSubjectExcluded);
+                            }                  
+                        },
+                        _ => {}
+                    }
+                }
+
                 for extension in current_certificate.tbs_certificate
-                    .extensions.extensions.iter() {
+                    .extensions.extensions.iter()
+                {
                     if let ExtensionValue::SubjectAlternativeName {
                         general_names
                     } = &extension.extension_value {
-                        // For each alt. names in SAN, it is NOT within one of the
-                        // excluded_subtrees for that name type
-                        // TODO: Do more than find exact match
-                        for general_name in general_names.iter() {
-                            excluded_subtrees.iter().find(
-                                |&excluded_name| excluded_name == general_name
-                            ).map_or(
-                                Ok(()),
-                                |_| Err(TlsError::CertificateSubjectExcluded)
-                            )?;
+                        // For each alt. names in SAN, it is not within any excluded subtrees
+                        for san_general_name in general_names.iter() {
+                            if excluded_subtrees.iter().find(
+                                |&excluded_name| {
+                                    // Either the general name are identical
+                                    // (for names that does not support subset operation subset),
+                                    // Or it belongs to a subtree
+                                    excluded_name == san_general_name ||
+                                    san_general_name.belongs_to(excluded_name)
+                                }
+                            ).is_some() {
+                                return Err(TlsError::CertificateSubjectExcluded);
+                            }
                         }
                     }
                 }
@@ -1018,22 +1198,22 @@ fn get_subtree_intersection<'a>(
         match general_name {
             GeneralName::URI(..) => {
                 if !has_other_uri_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             },
             GeneralName::RFC822Name(..) => {
                 if !has_other_rfc_822_name_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             }
             GeneralName::DNSName(..) => {
                 if !has_other_dns_name_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             }
             GeneralName::IPAddress(..) => {
                 if !has_other_ip_address_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             }
             // Other general_name variants should not appear in this subtree
@@ -1045,22 +1225,22 @@ fn get_subtree_intersection<'a>(
         match general_name {
             GeneralName::URI(..) => {
                 if !has_self_uri_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             },
             GeneralName::RFC822Name(..) => {
                 if !has_self_rfc_822_name_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             }
             GeneralName::DNSName(..) => {
                 if !has_self_dns_name_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             }
             GeneralName::IPAddress(..) => {
                 if !has_self_ip_address_tree {
-                    preserved_subtrees.push(*general_name);
+                    preserved_subtrees.push((*general_name).clone());
                 }
             }
             // Other general_name variants should not appear in this subtree
@@ -1114,9 +1294,9 @@ fn get_subtree_intersection<'a>(
 
             // Make use of subset method, note that all general names are hierarchical
             if self_name.is_subset_of(other_name) {
-                preserved_subtrees.push(*self_name)
+                preserved_subtrees.push((*self_name).clone())
             } else if other_name.is_subset_of(self_name) {
-                preserved_subtrees.push(*other_name)
+                preserved_subtrees.push((*other_name).clone())
             }
 
             // If neither are subset of the other, the intersection shall be none
@@ -1181,7 +1361,7 @@ fn prune_subset<'a>(subtree_out: &mut Vec<GeneralName<'a>>, subtree_in: &mut Vec
                 }
             }
         }
-        subtree_out.push(subtree_in[i])
+        subtree_out.push(subtree_in[i].clone())
     }
 }
 
