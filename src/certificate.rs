@@ -170,7 +170,7 @@ pub enum ExtensionValue<'a> {
 
 // Embedded value might be empty (&[])
 // This means a reject-all/accept-none condition
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum GeneralName<'a> {
     OtherName {
         type_id: &'a [u8],
@@ -187,6 +187,60 @@ pub enum GeneralName<'a> {
     URI(&'a [u8]),
     IPAddress(&'a [u8]),
     RegisteredID(&'a [u8]),
+}
+
+impl<'a> core::fmt::Debug for GeneralName<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OtherName {type_id, value} => {
+                f.debug_struct("OtherName")
+                    .field("type_id", type_id)
+                    .field("value", value)
+                    .finish()
+            },
+            Self::RFC822Name(name) => {
+                f.debug_tuple("RFC822Name")
+                    .field(&core::str::from_utf8(name).unwrap())
+                    .finish()
+            },
+            Self::DNSName(name) => {
+                f.debug_tuple("DNSName")
+                    .field(&core::str::from_utf8(name).unwrap())
+                    .finish()
+            },
+            Self::X400Address(name) => {
+                f.debug_tuple("X400Address")
+                    .field(&core::str::from_utf8(name).unwrap())
+                    .finish()
+            },
+            Self::DirectoryName(name) => {
+                f.debug_tuple("DirectoryName")
+                    .field(name)
+                    .finish()
+            },
+            Self::EDIPartyName {name_assigner, party_name} => {
+                f.debug_struct("EDIPartyName")
+                    .field("name_assigner", name_assigner)
+                    .field("party_name", party_name)
+                    .finish()
+            },
+            Self::URI(name) => {
+                f.debug_tuple("URI")
+                    .field(&core::str::from_utf8(name).unwrap())
+                    .finish()
+            },
+            Self::IPAddress(name) => {
+                f.debug_tuple("IPAddress")
+                    .field(name)
+                    .finish()
+            },
+            Self::RegisteredID(name) => {
+                f.debug_tuple("RegisteredID")
+                    .field(name)
+                    .finish()
+            },
+        }
+    }
 }
 
 // Set operation for General Name (X is a subset of Y, where X, Y are the same variant)
@@ -1160,21 +1214,32 @@ fn get_subtree_intersection<'a>(
     cert_subtree: &Vec<GeneralName<'a>>
 ) {
     // 1. Determine the variants that need to be preserved (i.e. body-count)
+    // This is to preserve general names that does not have any matching variant
+    // Intersecting or unioning onceself return the input value (by identity law)
     let mut has_self_uri_tree = false;
     let mut has_other_uri_tree = false;
     let mut has_self_rfc_822_name_tree = false;
     let mut has_other_rfc_822_name_tree = false;
     let mut has_self_dns_name_tree = false;
     let mut has_other_dns_name_tree = false;
-    let mut has_self_ip_address_tree = false;
-    let mut has_other_ip_address_tree = false;
+    let mut has_self_ipv4_address_tree = false;
+    let mut has_other_ipv4_address_tree = false;
+    let mut has_self_ipv6_address_tree = false;
+    let mut has_other_ipv6_address_tree = false;
 
     for general_name in state_subtree.iter() {
         match general_name {
             GeneralName::URI(..) => has_self_uri_tree = true,
             GeneralName::RFC822Name(..) => has_self_rfc_822_name_tree = true,
             GeneralName::DNSName(..) => has_self_dns_name_tree = true,
-            GeneralName::IPAddress(..) => has_self_ip_address_tree = true,
+            GeneralName::IPAddress(self_ip) => {
+                if self_ip.len() == 8 || self_ip.len() == 0 {
+                    has_self_ipv4_address_tree = true;
+                }
+                if self_ip.len() == 32 || self_ip.len() == 0 {
+                    has_self_ipv6_address_tree = true;
+                }
+            },
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1185,7 +1250,14 @@ fn get_subtree_intersection<'a>(
             GeneralName::URI(..) => has_other_uri_tree = true,
             GeneralName::RFC822Name(..) => has_other_rfc_822_name_tree = true,
             GeneralName::DNSName(..) => has_other_dns_name_tree = true,
-            GeneralName::IPAddress(..) => has_other_ip_address_tree = true,
+            GeneralName::IPAddress(other_ip) => {
+                if other_ip.len() == 8 || other_ip.len() == 0 {
+                    has_other_ipv4_address_tree = true;
+                }
+                if other_ip.len() == 32 || other_ip.len() == 0 {
+                    has_other_ipv6_address_tree = true;
+                }
+            },
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1205,17 +1277,20 @@ fn get_subtree_intersection<'a>(
                 if !has_other_rfc_822_name_tree {
                     preserved_subtrees.push((*general_name).clone());
                 }
-            }
+            },
             GeneralName::DNSName(..) => {
                 if !has_other_dns_name_tree {
                     preserved_subtrees.push((*general_name).clone());
                 }
-            }
-            GeneralName::IPAddress(..) => {
-                if !has_other_ip_address_tree {
+            },
+            GeneralName::IPAddress(ip) => {
+                if !has_other_ipv4_address_tree && ip.len() == 8 {
                     preserved_subtrees.push((*general_name).clone());
                 }
-            }
+                else if !has_other_ipv6_address_tree && ip.len() == 32 {
+                    preserved_subtrees.push((*general_name).clone());
+                }
+            },
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1232,17 +1307,20 @@ fn get_subtree_intersection<'a>(
                 if !has_self_rfc_822_name_tree {
                     preserved_subtrees.push((*general_name).clone());
                 }
-            }
+            },
             GeneralName::DNSName(..) => {
                 if !has_self_dns_name_tree {
                     preserved_subtrees.push((*general_name).clone());
                 }
-            }
-            GeneralName::IPAddress(..) => {
-                if !has_self_ip_address_tree {
+            },
+            GeneralName::IPAddress(ip) => {
+                if !has_self_ipv4_address_tree && ip.len() == 8 {
                     preserved_subtrees.push((*general_name).clone());
                 }
-            }
+                else if !has_self_ipv6_address_tree && ip.len() == 32 {
+                    preserved_subtrees.push((*general_name).clone());
+                }
+            },
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1377,4 +1455,538 @@ pub fn get_subtree_union<'a>(
     state_subtree.clear();
 
     prune_subset(state_subtree, &mut merged_subtrees);
+}
+
+#[cfg(test)]
+mod test {
+    use alloc::vec::Vec;
+    use super::*;
+
+    const DNS_EXAMPLE_COM: GeneralName = GeneralName::DNSName(
+        b"example.com"
+    );
+    const DNS_FOO_EXAMPLE: GeneralName = GeneralName::DNSName(
+        b"foo.example.com"
+    );
+    const DNS_EXAMPLE_NET: GeneralName = GeneralName::DNSName(
+        b"example.net"
+    );
+    const DNS_EMPTY: GeneralName = GeneralName::DNSName(
+        b""
+    );
+
+    // Helper to init logger if necessary
+    fn init() {
+        simple_logger::SimpleLogger::new().init();
+    }
+
+    /*
+     *  Simple example from RFC 5280, section 6.1.4, page 85, statement (g)
+     */
+
+    // The intersection between "foo.example.com" and "example.com" shall be
+    // "foo.example.com"
+    #[test]
+    fn test_foo_example_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EXAMPLE_COM);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_FOO_EXAMPLE);
+
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            cert_subtrees
+        );
+    }
+
+    // The intersection between "example.com" and "example.net" shall be
+    // "" (empty set)
+    #[test]
+    fn test_example_com_net_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EXAMPLE_COM);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_EXAMPLE_NET);
+
+        let mut expected_tree_with_empty_entry: Vec<GeneralName> = Vec::new();
+        expected_tree_with_empty_entry.push(DNS_EMPTY);
+
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree_with_empty_entry
+        );
+    }
+
+    // The union between "example.com" and "foo.example.com" shall be "example.com"
+    #[test]
+    fn test_foo_example_union() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EXAMPLE_COM);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_FOO_EXAMPLE);
+
+        let mut expected_tree: Vec<GeneralName> = Vec::new();
+        expected_tree.push(DNS_EXAMPLE_COM);
+
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree
+        );
+    }
+
+    // The union between "example.com" and "example.net" shall be both namespaces
+    #[test]
+    fn test_example_com_net_union() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EXAMPLE_COM);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_EXAMPLE_NET);
+
+        let mut expected_tree: Vec<GeneralName> = Vec::new();
+        expected_tree.push(DNS_EXAMPLE_COM);
+        expected_tree.push(DNS_EXAMPLE_NET);
+
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree
+        );
+    }
+
+    /*
+     *  Behaviour of empty set within intersection and union operations
+     */
+    
+    // Empty set intersects other set
+    // Empty intersects any set gives empty set
+    #[test]
+    fn test_empty_set_intersects_other_set() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EMPTY);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_EXAMPLE_COM);
+        cert_subtrees.push(DNS_EXAMPLE_NET);
+        cert_subtrees.push(DNS_FOO_EXAMPLE);
+
+        let mut expected_tree: Vec<GeneralName> = Vec::new();
+        expected_tree.push(DNS_EMPTY);
+
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree
+        );
+    }
+
+    // Other set intersects empty set
+    // Anything intersects empty set gives empty set
+    #[test]
+    fn test_other_set_intersects_empty_set() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EXAMPLE_COM);
+        state_subtrees.push(DNS_FOO_EXAMPLE);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_EMPTY);
+
+        let mut expected_tree: Vec<GeneralName> = Vec::new();
+        expected_tree.push(DNS_EMPTY);
+
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree
+        );
+    }
+
+    /*
+     *  Behaviour of unspecificed variant
+     */
+    #[test]
+    fn test_unspecified_DNS() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(DNS_EXAMPLE_COM);
+        state_subtrees.push(DNS_FOO_EXAMPLE);
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+
+        let mut expected_tree: Vec<GeneralName> = Vec::new();
+        expected_tree.push(DNS_EXAMPLE_COM);
+
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree
+        );
+    }
+
+    #[test]
+    fn test_specifying_DNS_from_unspecified() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(DNS_EXAMPLE_COM);
+        cert_subtrees.push(DNS_FOO_EXAMPLE);
+
+        let mut expected_tree: Vec<GeneralName> = Vec::new();
+        expected_tree.push(DNS_EXAMPLE_COM);
+
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_tree
+        );
+    }
+
+    /*
+     *  Behaviour of IP intersection/union operation
+     */
+    // 192.168.0.1/24
+    const CIDR_IPv4_1: GeneralName = GeneralName::IPAddress(
+        &[192, 168, 0, 1, 255, 255, 255, 0]
+    );
+    // 192.168.0.1/25
+    const CIDR_IPv4_2: GeneralName = GeneralName::IPAddress(
+        &[192, 168, 0, 1, 255, 255, 255, 128]
+    );
+
+    #[test]
+    fn test_ip_24_25_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_1);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_2);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_2);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    // 192.168.0.1/31
+    const CIDR_IPv4_3: GeneralName = GeneralName::IPAddress(
+        &[192, 168, 0, 1, 255, 255, 255, 254]
+    );
+
+    #[test]
+    fn test_ip_24_31_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_1);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_3);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_3);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    const CIDR_IPv4_4: GeneralName = GeneralName::IPAddress(
+        &[192, 72, 0, 1, 255, 255, 255, 0]
+    );
+
+    const CIDR_IPv4_NONE: GeneralName = GeneralName::IPAddress(
+        &[]
+    );
+
+    #[test]
+    fn test_ip_disjoint_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_1);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_4);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_NONE);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    #[test]
+    fn test_ip_24_25_intersection_reversed() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_2);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_1);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_2);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    #[test]
+    fn test_ip_24_31_intersection_reversed() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_3);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_1);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_3);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    #[test]
+    fn test_ip_disjoint_intersection_reversed() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_4);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_1);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_NONE);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    /*
+     *  Empty set behaviour
+     */
+    #[test]
+    fn test_ip_empty_intersect() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_NONE);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_1);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_NONE);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+
+        cert_subtrees.clear();
+        cert_subtrees.push(CIDR_IPv4_2);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+
+        cert_subtrees.clear();
+        cert_subtrees.push(CIDR_IPv4_3);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        ); 
+
+        cert_subtrees.clear();
+        cert_subtrees.push(CIDR_IPv4_NONE);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        ); 
+    }
+
+    #[test]
+    fn test_ip_empty_union() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_NONE);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_1);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_1);
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_NONE);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_2);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_2);
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_NONE);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_3);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_3);
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_NONE);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_4);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_4);
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    const CIDR_IPv4_5: GeneralName = GeneralName::IPAddress(
+        &[192, 72, 0, 0, 255, 255, 255, 0]
+    );
+    const CIDR_IPv4_6: GeneralName = GeneralName::IPAddress(
+        &[192, 200, 103, 0, 255, 255, 255, 0]
+    );
+    const CIDR_IPv4_7: GeneralName = GeneralName::IPAddress(
+        &[192, 200, 100, 0, 255, 255, 252, 0]
+    );
+    const CIDR_IPv4_8: GeneralName = GeneralName::IPAddress(
+        &[200, 200, 100, 0, 255, 255, 255, 0]
+    );
+
+    /*
+     *  Multiple IP set behaviour
+     */
+    #[test]
+    fn test_multiple_ip_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_5);
+        state_subtrees.push(CIDR_IPv4_6);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_7);
+        cert_subtrees.push(CIDR_IPv4_8);
+
+        // Basically, there are 3 disjoint sets
+        // CIDR_IPv4_5, (CIDR_IPv4_6, CIDR_IPv4_7), CIDR_IPv4_8
+        // The only overlapping area between set 1 and set 2 is CIDR_IPv4_6,
+        // as CIDR_IPv4_6 is a subnet of CIDR_IPv4_7, while other networks
+        // are disjoint
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_6);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    #[test]
+    fn test_multiple_ip_union() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv4_5);
+        state_subtrees.push(CIDR_IPv4_6);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_7);
+        cert_subtrees.push(CIDR_IPv4_8);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv4_5);
+        expected_subtrees.push(CIDR_IPv4_7);
+        expected_subtrees.push(CIDR_IPv4_8);
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
+
+    const CIDR_IPv6_1: GeneralName = GeneralName::IPAddress(
+        &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xFE, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+    const CIDR_IPv6_2: GeneralName = GeneralName::IPAddress(
+        &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xFE, 0x01,
+        0x12, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+    // const CIDR_IPv6_3: GeneralName = GeneralName::IPAddress(
+    //     &[192, 200, 100, 0, 255, 255, 252, 0]
+    // );
+    // const CIDR_IPv6_4: GeneralName = GeneralName::IPAddress(
+    //     &[200, 200, 100, 0, 255, 255, 255, 0]
+    // );
+
+    /*
+     *  Heterogeneous IP intersection/union
+     */
+    #[test]
+    fn test_ipv4_ipv6_mix_intersection() {
+        init();
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        state_subtrees.push(CIDR_IPv6_1);
+        state_subtrees.push(CIDR_IPv6_2);
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        cert_subtrees.push(CIDR_IPv4_7);
+        cert_subtrees.push(CIDR_IPv4_6);
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+        expected_subtrees.push(CIDR_IPv6_1);
+        expected_subtrees.push(CIDR_IPv4_7);
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(
+            state_subtrees,
+            expected_subtrees
+        );
+    }
 }
