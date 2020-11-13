@@ -353,6 +353,30 @@ impl<'a> GeneralName<'a> {
                                         // Self IP address is not NULL
                 }
             },
+            (Self::DirectoryName(self_name), Self::DirectoryName(other_name)) => {
+                if self_name.relative_distinguished_name.len() == 0 {
+                    true    // Empty set is always a subset of other set
+                } else if other_name.relative_distinguished_name.len() == 0 {
+                    false   // If self is not empty, other is empty, other is a subset
+                } else if self_name.relative_distinguished_name.len()
+                    < other_name.relative_distinguished_name.len() {
+                    false
+                } else {
+                    // For each RDN in other, if self has the same RDN
+                    // then self is within the subtree of other
+                    // Special case: therecould be no RDN in other
+                    // In this case other_name is empty
+                    // it should be handled in prior
+                    for other_rdn in other_name.relative_distinguished_name.iter() {
+                        if self_name.relative_distinguished_name.iter().find(
+                            |&self_rdn| self_rdn == other_rdn
+                        ).is_none() {
+                            return false;
+                        }
+                    }
+                    true
+                }
+            }
             _ => false                  // Heterogeneity, in terms of GeneralName variant
         }
     }
@@ -370,10 +394,12 @@ impl<'a> GeneralName<'a> {
         match (self, other) {
             (Self::URI(self_uri), Self::URI(other_uri)) => {
                 self_uri.ends_with(other_uri)
-            }
-            (Self::RFC822Name(..), Self::RFC822Name(..))
-            | (Self::DNSName(..), Self::DNSName(..)) => {
-                self.is_subset_of(other)
+            },
+            (Self::RFC822Name(self_rfc_822), Self::RFC822Name(other_rfc_822)) => {
+                self_rfc_822.ends_with(other_rfc_822)
+            },
+            (Self::DNSName(self_dns), Self::DNSName(other_dns)) => {
+                self_dns.ends_with(other_dns)
             },
 
             (Self::IPAddress(san_ip), Self::IPAddress(cidr_network)) => {
@@ -418,6 +444,10 @@ impl<'a> GeneralName<'a> {
                 }
             },
 
+            (Self::DirectoryName(self_dir_name), Self::DirectoryName(other_dir_name)) => {
+                self_dir_name.belongs_to(other_dir_name)
+            },
+
             // Unsupported variant/heterogeneous comparison
             _ => false,
         }
@@ -455,9 +485,10 @@ pub struct Name<'a> {
 
 impl<'a> Name<'a> {
     pub fn belongs_to(&self, other: &Self) -> bool {
-        if self.relative_distinguished_name.len()
-            < other.relative_distinguished_name.len()
-        {
+        if other.relative_distinguished_name.len() == 0 {
+            true        // Wildcard
+        } else if self.relative_distinguished_name.len()
+            < other.relative_distinguished_name.len() {
             false
         } else {
             // For each RDN in other, self must have the same RDN
@@ -475,10 +506,19 @@ impl<'a> Name<'a> {
 }
 
 impl<'a> PartialEq for Name<'a> {
+    // Equivalent operator
+    // It should treat permutated name as equivalent
     fn eq(&self, other: &Self) -> bool {
         for self_name in self.relative_distinguished_name.iter() {
             if other.relative_distinguished_name.iter().find(
                 |&att_type_val| att_type_val == self_name
+            ).is_none() {
+                return false;
+            }
+        }
+        for other_name in other.relative_distinguished_name.iter() {
+            if self.relative_distinguished_name.iter().find(
+                |&att_type_val| att_type_val == other_name
             ).is_none() {
                 return false;
             }
@@ -1226,6 +1266,8 @@ fn get_subtree_intersection<'a>(
     let mut has_other_ipv4_address_tree = false;
     let mut has_self_ipv6_address_tree = false;
     let mut has_other_ipv6_address_tree = false;
+    let mut has_self_directory_name = false;
+    let mut has_other_directory_name = false;
 
     for general_name in state_subtree.iter() {
         match general_name {
@@ -1240,6 +1282,7 @@ fn get_subtree_intersection<'a>(
                     has_self_ipv6_address_tree = true;
                 }
             },
+            GeneralName::DirectoryName(..) => has_self_directory_name = true,
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1258,6 +1301,7 @@ fn get_subtree_intersection<'a>(
                     has_other_ipv6_address_tree = true;
                 }
             },
+            GeneralName::DirectoryName(..) => has_other_directory_name = true,
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1291,6 +1335,11 @@ fn get_subtree_intersection<'a>(
                     preserved_subtrees.push((*general_name).clone());
                 }
             },
+            GeneralName::DirectoryName(..) => {
+                if !has_other_directory_name {
+                    preserved_subtrees.push((*general_name).clone());
+                }
+            }
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1321,6 +1370,11 @@ fn get_subtree_intersection<'a>(
                     preserved_subtrees.push((*general_name).clone());
                 }
             },
+            GeneralName::DirectoryName(..) => {
+                if !has_self_directory_name {
+                    preserved_subtrees.push((*general_name).clone());
+                }
+            }
             // Other general_name variants should not appear in this subtree
             _ => {},
         }
@@ -1379,30 +1433,39 @@ fn get_subtree_intersection<'a>(
 
             // If neither are subset of the other, the intersection shall be none
             // Should both names be homogeneous, it should imply an all-blocking name
-            match (self_name, other_name) {
-                (GeneralName::URI(self_uri), GeneralName::URI(other_uri)) => {
-                    preserved_subtrees.push(
-                        GeneralName::URI(&[])
-                    )
-                },
-                (GeneralName::RFC822Name(self_mail), GeneralName::RFC822Name(other_mail)) => {
-                    preserved_subtrees.push(
-                        GeneralName::RFC822Name(&[])
-                    )
-                },
-                (GeneralName::DNSName(self_dns), GeneralName::DNSName(other_dns)) => {
-                    preserved_subtrees.push(
-                        GeneralName::DNSName(&[])
-                    )
-                },
-                (GeneralName::IPAddress(self_ip), GeneralName::IPAddress(other_ip)) => {
-                    preserved_subtrees.push(
-                        GeneralName::IPAddress(&[])
-                    )
-                },
+            else {
+                match (self_name, other_name) {
+                    (GeneralName::URI(self_uri), GeneralName::URI(other_uri)) => {
+                        preserved_subtrees.push(
+                            GeneralName::URI(&[])
+                        )
+                    },
+                    (GeneralName::RFC822Name(self_mail), GeneralName::RFC822Name(other_mail)) => {
+                        preserved_subtrees.push(
+                            GeneralName::RFC822Name(&[])
+                        )
+                    },
+                    (GeneralName::DNSName(self_dns), GeneralName::DNSName(other_dns)) => {
+                        preserved_subtrees.push(
+                            GeneralName::DNSName(&[])
+                        )
+                    },
+                    (GeneralName::IPAddress(self_ip), GeneralName::IPAddress(other_ip)) => {
+                        preserved_subtrees.push(
+                            GeneralName::IPAddress(&[])
+                        )
+                    },
+                    (GeneralName::DirectoryName(..), GeneralName::DirectoryName(..)) => {
+                        preserved_subtrees.push(
+                            GeneralName::DirectoryName(Name {
+                                relative_distinguished_name: Vec::new()
+                            })
+                        )
+                    }
 
-                // Heterogeneous general name variants
-                _ => {}
+                    // Heterogeneous general name variants
+                    _ => {}
+                }
             }
         }
     }
@@ -1459,8 +1522,15 @@ pub fn get_subtree_union<'a>(
 
 #[cfg(test)]
 mod test {
+
     use alloc::vec::Vec;
     use super::*;
+    use crate::parse::parse_asn1_der_name;
+
+    // Helper to init logger if necessary
+    fn init() {
+        simple_logger::SimpleLogger::new().init();
+    }
 
     const DNS_EXAMPLE_COM: GeneralName = GeneralName::DNSName(
         b"example.com"
@@ -1475,11 +1545,6 @@ mod test {
         b""
     );
 
-    // Helper to init logger if necessary
-    fn init() {
-        simple_logger::SimpleLogger::new().init();
-    }
-
     /*
      *  Behaviour of IP intersection/union operation
      */
@@ -1491,50 +1556,75 @@ mod test {
     const CIDR_IPv4_2: GeneralName = GeneralName::IPAddress(
         &[192, 168, 0, 1, 255, 255, 255, 128]
     );
-
     // 192.168.0.1/31
     const CIDR_IPv4_3: GeneralName = GeneralName::IPAddress(
         &[192, 168, 0, 1, 255, 255, 255, 254]
     );
-
+    // 192.72.0.1/24
     const CIDR_IPv4_4: GeneralName = GeneralName::IPAddress(
         &[192, 72, 0, 1, 255, 255, 255, 0]
     );
-
+    // Wildcard
     const CIDR_IPv4_NONE: GeneralName = GeneralName::IPAddress(
         &[]
     );
-
+    // 192.72.0.0/24
     const CIDR_IPv4_5: GeneralName = GeneralName::IPAddress(
         &[192, 72, 0, 0, 255, 255, 255, 0]
     );
+    // 192.200.103.0/24
     const CIDR_IPv4_6: GeneralName = GeneralName::IPAddress(
         &[192, 200, 103, 0, 255, 255, 255, 0]
     );
+    // 192.200.100.0/22
     const CIDR_IPv4_7: GeneralName = GeneralName::IPAddress(
         &[192, 200, 100, 0, 255, 255, 252, 0]
     );
+    // 200.200.100.0/24
     const CIDR_IPv4_8: GeneralName = GeneralName::IPAddress(
         &[200, 200, 100, 0, 255, 255, 255, 0]
     );
 
+    // 2001:0db8:ac10:fe01::/64
     const CIDR_IPv6_1: GeneralName = GeneralName::IPAddress(
         &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xFE, 0x01,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
     );
+    // 2001:0db8:ac10:fe01:1224::/80
     const CIDR_IPv6_2: GeneralName = GeneralName::IPAddress(
         &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xFE, 0x01,
         0x12, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
     );
+    // 2001:0db8:ac10:ac01::/64
     const CIDR_IPv6_3: GeneralName = GeneralName::IPAddress(
         &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xAC, 0x01,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+    // URI
+    const URI_HOST_SPECIFIC: GeneralName = GeneralName::URI(
+        b"host.example.com"
+    );
+    const URI_HOST_ONLY: GeneralName = GeneralName::URI(
+        b".example.com"
+    );
+    const URI_DOMAIN_WIDE: GeneralName = GeneralName::URI(
+        b"example.com"
+    );
+    // X400, not supported
+    const X400_ROOT: GeneralName = GeneralName::X400Address(
+        b"root@example.com"
+    );
+    const X400_HOST: GeneralName = GeneralName::X400Address(
+        b"example.com"
+    );
+    const X400_DOMAIN_WIDE: GeneralName = GeneralName::X400Address(
+        b".example.com"
     );
 
     macro_rules! test_set_intersection {
@@ -1610,7 +1700,8 @@ mod test {
         // Intersection between DNS set and unspecified set
         DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, , DNS_EXAMPLE_COM;
         , DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM;
-        // Intersection between subset and superset
+
+        // Intersection between subnet and supernet
         CIDR_IPv4_1, CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_2;
         CIDR_IPv4_1 CIDR_IPv4_2, CIDR_IPv4_3, CIDR_IPv4_3;
         CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_1, CIDR_IPv4_2;
@@ -1629,7 +1720,14 @@ mod test {
         // Adding a disjoint IPv6 on state subtrees should not alter intersection result
         CIDR_IPv6_1 CIDR_IPv4_7 CIDR_IPv6_3, CIDR_IPv6_2 CIDR_IPv4_6, CIDR_IPv6_2 CIDR_IPv4_6;
         // Heterogeneous disjoint intersection, effectively self union
-        CIDR_IPv6_1 CIDR_IPv6_2, CIDR_IPv4_7 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7
+        CIDR_IPv6_1 CIDR_IPv6_2, CIDR_IPv4_7 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7;
+
+        // Intersection between heterogeneous variants
+        DNS_FOO_EXAMPLE, CIDR_IPv6_1, DNS_FOO_EXAMPLE CIDR_IPv6_1;
+        DNS_FOO_EXAMPLE CIDR_IPv6_2, CIDR_IPv6_1 DNS_EXAMPLE_NET, DNS_EMPTY CIDR_IPv6_2;
+
+        // Intersection with variants that do not support such operation
+        X400_ROOT DNS_FOO_EXAMPLE CIDR_IPv6_2, CIDR_IPv6_1 DNS_EXAMPLE_NET, DNS_EMPTY CIDR_IPv6_2
     );
 
     test_set_union!(
@@ -1645,7 +1743,8 @@ mod test {
         // Union between DNS set and unspecified set
         DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, , DNS_EXAMPLE_COM;
         , DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM;
-        // Union between subset and superset
+
+        // Union between subnet and supernet
         CIDR_IPv4_1, CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_1;
         CIDR_IPv4_1 CIDR_IPv4_3, CIDR_IPv4_2, CIDR_IPv4_1;
         CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_1, CIDR_IPv4_1;
@@ -1661,6 +1760,127 @@ mod test {
         // Adding a disjoint IPv6 on state subtrees should mean appending the disjoin subtree
         CIDR_IPv6_1 CIDR_IPv6_3 CIDR_IPv4_7, CIDR_IPv6_2 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv6_3 CIDR_IPv4_7;
         // Heterogeneous disjoint union, effectively self union
-        CIDR_IPv6_1 CIDR_IPv6_2, CIDR_IPv4_7 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7
+        CIDR_IPv6_1 CIDR_IPv6_2, CIDR_IPv4_7 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7;
+
+        // Union between heterogeneous variants
+        DNS_FOO_EXAMPLE, CIDR_IPv6_1, DNS_FOO_EXAMPLE CIDR_IPv6_1;
+        DNS_FOO_EXAMPLE CIDR_IPv6_2, CIDR_IPv6_1 DNS_EXAMPLE_NET, DNS_FOO_EXAMPLE CIDR_IPv6_1 DNS_EXAMPLE_NET;
+
+        // Intersection with variants that do not support such operation
+        X400_ROOT DNS_FOO_EXAMPLE CIDR_IPv6_2, CIDR_IPv6_1 DNS_EXAMPLE_NET, X400_ROOT DNS_FOO_EXAMPLE CIDR_IPv6_1 DNS_EXAMPLE_NET
     );
+
+    #[test]
+    fn test_directory_name_operations() {
+        // Less specific directory name
+        let broad_name = parse_asn1_der_name(
+            &[0x30, 0x22, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
+            0x02, 0x55, 0x53, 0x31, 0x13, 0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x0a,
+            0x13, 0x0a, 0x45, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x20, 0x43, 0x41]
+        ).unwrap().1;
+
+        // More specific directory name
+        let specific_name = parse_asn1_der_name(
+            &[0x30, 0x2e, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
+            0x02, 0x55, 0x53, 0x31, 0x13, 0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x0a,
+            0x13, 0x0a, 0x45, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x20, 0x43, 0x41,
+            0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x07, 0x13, 0x01, 0x70]
+        ).unwrap().1;
+
+        // Disjoint name
+        let disjoint_name = parse_asn1_der_name(
+            &[0x30, 0x22, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
+            0x02, 0x55, 0x53, 0x31, 0x13, 0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x0a,
+            0x13, 0x0a, 0x45, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x20, 0x43, 0x42]
+        ).unwrap().1;
+
+        // Permutated name
+        let permutated_name = parse_asn1_der_name(
+            &[0x30, 0x22, 0x31, 0x13, 0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x0a,
+            0x13, 0x0a, 0x45, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x20, 0x43, 0x41,
+            0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
+            0x02, 0x55, 0x53]
+        ).unwrap().1;
+
+        // Empty name
+        let empty_name = Name {
+            relative_distinguished_name: Vec::new()
+        };
+
+        assert!(specific_name.belongs_to(&broad_name));
+        assert!(!disjoint_name.belongs_to(&broad_name));
+        assert!(!disjoint_name.belongs_to(&specific_name));
+        assert!(specific_name != broad_name);
+        assert!(broad_name != specific_name);
+        assert!(broad_name == permutated_name);
+
+        let mut state_subtrees: Vec<GeneralName> = Vec::new();
+        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+
+        let broad_general_name = GeneralName::DirectoryName(broad_name);
+        let specific_general_name = GeneralName::DirectoryName(specific_name);
+        let disjoint_general_name = GeneralName::DirectoryName(disjoint_name);
+        let permutated_general_name = GeneralName::DirectoryName(permutated_name);
+        let empty_general_name = GeneralName::DirectoryName(empty_name);
+
+        assert!(specific_general_name.is_subset_of(&broad_general_name));
+        assert!(!broad_general_name.is_subset_of(&specific_general_name));
+        assert!(specific_general_name != broad_general_name);
+
+        assert!(empty_general_name.is_subset_of(&specific_general_name));
+        assert!(!specific_general_name.is_subset_of(&empty_general_name));
+
+        state_subtrees.push(broad_general_name.clone());
+        cert_subtrees.push(specific_general_name.clone());
+        expected_subtrees.push(specific_general_name.clone());
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(broad_general_name.clone());
+        cert_subtrees.push(specific_general_name.clone());
+        expected_subtrees.push(broad_general_name.clone());
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        // Behaviour with empty name
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(empty_general_name.clone());
+        cert_subtrees.push(specific_general_name.clone());
+        expected_subtrees.push(empty_general_name.clone());
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(empty_general_name.clone());
+        cert_subtrees.push(specific_general_name.clone());
+        expected_subtrees.push(specific_general_name.clone());
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(specific_general_name.clone());
+        cert_subtrees.push(empty_general_name.clone());
+        expected_subtrees.push(empty_general_name.clone());
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(specific_general_name.clone());
+        cert_subtrees.push(empty_general_name.clone());
+        expected_subtrees.push(specific_general_name.clone());
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+    }
 }
