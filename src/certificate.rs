@@ -1481,188 +1481,6 @@ mod test {
     }
 
     /*
-     *  Simple example from RFC 5280, section 6.1.4, page 85, statement (g)
-     */
-
-    // The intersection between "foo.example.com" and "example.com" shall be
-    // "foo.example.com"
-    #[test]
-    fn test_foo_example_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EXAMPLE_COM);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_FOO_EXAMPLE);
-
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            cert_subtrees
-        );
-    }
-
-    // The intersection between "example.com" and "example.net" shall be
-    // "" (empty set)
-    #[test]
-    fn test_example_com_net_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EXAMPLE_COM);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_EXAMPLE_NET);
-
-        let mut expected_tree_with_empty_entry: Vec<GeneralName> = Vec::new();
-        expected_tree_with_empty_entry.push(DNS_EMPTY);
-
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree_with_empty_entry
-        );
-    }
-
-    // The union between "example.com" and "foo.example.com" shall be "example.com"
-    #[test]
-    fn test_foo_example_union() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EXAMPLE_COM);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_FOO_EXAMPLE);
-
-        let mut expected_tree: Vec<GeneralName> = Vec::new();
-        expected_tree.push(DNS_EXAMPLE_COM);
-
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree
-        );
-    }
-
-    // The union between "example.com" and "example.net" shall be both namespaces
-    #[test]
-    fn test_example_com_net_union() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EXAMPLE_COM);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_EXAMPLE_NET);
-
-        let mut expected_tree: Vec<GeneralName> = Vec::new();
-        expected_tree.push(DNS_EXAMPLE_COM);
-        expected_tree.push(DNS_EXAMPLE_NET);
-
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree
-        );
-    }
-
-    /*
-     *  Behaviour of empty set within intersection and union operations
-     */
-    
-    // Empty set intersects other set
-    // Empty intersects any set gives empty set
-    #[test]
-    fn test_empty_set_intersects_other_set() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EMPTY);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_EXAMPLE_COM);
-        cert_subtrees.push(DNS_EXAMPLE_NET);
-        cert_subtrees.push(DNS_FOO_EXAMPLE);
-
-        let mut expected_tree: Vec<GeneralName> = Vec::new();
-        expected_tree.push(DNS_EMPTY);
-
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree
-        );
-    }
-
-    // Other set intersects empty set
-    // Anything intersects empty set gives empty set
-    #[test]
-    fn test_other_set_intersects_empty_set() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EXAMPLE_COM);
-        state_subtrees.push(DNS_FOO_EXAMPLE);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_EMPTY);
-
-        let mut expected_tree: Vec<GeneralName> = Vec::new();
-        expected_tree.push(DNS_EMPTY);
-
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree
-        );
-    }
-
-    /*
-     *  Behaviour of unspecificed variant
-     */
-    #[test]
-    fn test_unspecified_DNS() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(DNS_EXAMPLE_COM);
-        state_subtrees.push(DNS_FOO_EXAMPLE);
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-
-        let mut expected_tree: Vec<GeneralName> = Vec::new();
-        expected_tree.push(DNS_EXAMPLE_COM);
-
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree
-        );
-    }
-
-    #[test]
-    fn test_specifying_DNS_from_unspecified() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(DNS_EXAMPLE_COM);
-        cert_subtrees.push(DNS_FOO_EXAMPLE);
-
-        let mut expected_tree: Vec<GeneralName> = Vec::new();
-        expected_tree.push(DNS_EXAMPLE_COM);
-
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_tree
-        );
-    }
-
-    /*
      *  Behaviour of IP intersection/union operation
      */
     // 192.168.0.1/24
@@ -1674,44 +1492,10 @@ mod test {
         &[192, 168, 0, 1, 255, 255, 255, 128]
     );
 
-    #[test]
-    fn test_ip_24_25_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_1);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_2);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_2);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
     // 192.168.0.1/31
     const CIDR_IPv4_3: GeneralName = GeneralName::IPAddress(
         &[192, 168, 0, 1, 255, 255, 255, 254]
     );
-
-    #[test]
-    fn test_ip_24_31_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_1);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_3);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_3);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
 
     const CIDR_IPv4_4: GeneralName = GeneralName::IPAddress(
         &[192, 72, 0, 1, 255, 255, 255, 0]
@@ -1720,171 +1504,6 @@ mod test {
     const CIDR_IPv4_NONE: GeneralName = GeneralName::IPAddress(
         &[]
     );
-
-    #[test]
-    fn test_ip_disjoint_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_1);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_4);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_NONE);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
-    #[test]
-    fn test_ip_24_25_intersection_reversed() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_2);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_1);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_2);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
-    #[test]
-    fn test_ip_24_31_intersection_reversed() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_3);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_1);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_3);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
-    #[test]
-    fn test_ip_disjoint_intersection_reversed() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_4);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_1);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_NONE);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
-    /*
-     *  Empty set behaviour
-     */
-    #[test]
-    fn test_ip_empty_intersect() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_NONE);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_1);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_NONE);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-
-        cert_subtrees.clear();
-        cert_subtrees.push(CIDR_IPv4_2);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-
-        cert_subtrees.clear();
-        cert_subtrees.push(CIDR_IPv4_3);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        ); 
-
-        cert_subtrees.clear();
-        cert_subtrees.push(CIDR_IPv4_NONE);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        ); 
-    }
-
-    #[test]
-    fn test_ip_empty_union() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_NONE);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_1);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_1);
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_NONE);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_2);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_2);
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_NONE);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_3);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_3);
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_NONE);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_4);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_4);
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
 
     const CIDR_IPv4_5: GeneralName = GeneralName::IPAddress(
         &[192, 72, 0, 0, 255, 255, 255, 0]
@@ -1899,55 +1518,6 @@ mod test {
         &[200, 200, 100, 0, 255, 255, 255, 0]
     );
 
-    /*
-     *  Multiple IP set behaviour
-     */
-    #[test]
-    fn test_multiple_ip_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_5);
-        state_subtrees.push(CIDR_IPv4_6);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_7);
-        cert_subtrees.push(CIDR_IPv4_8);
-
-        // Basically, there are 3 disjoint sets
-        // CIDR_IPv4_5, (CIDR_IPv4_6, CIDR_IPv4_7), CIDR_IPv4_8
-        // The only overlapping area between set 1 and set 2 is CIDR_IPv4_6,
-        // as CIDR_IPv4_6 is a subnet of CIDR_IPv4_7, while other networks
-        // are disjoint
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_6);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
-    #[test]
-    fn test_multiple_ip_union() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv4_5);
-        state_subtrees.push(CIDR_IPv4_6);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_7);
-        cert_subtrees.push(CIDR_IPv4_8);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv4_5);
-        expected_subtrees.push(CIDR_IPv4_7);
-        expected_subtrees.push(CIDR_IPv4_8);
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
     const CIDR_IPv6_1: GeneralName = GeneralName::IPAddress(
         &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xFE, 0x01,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1960,90 +1530,137 @@ mod test {
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
     );
+    const CIDR_IPv6_3: GeneralName = GeneralName::IPAddress(
+        &[0x20, 0x01, 0x0D, 0xB8, 0xAC, 0x10, 0xAC, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
 
-    /*
-     *  Heterogeneous IP intersection/union
-     */
-    #[test]
-    fn test_ipv4_ipv6_mix_intersection() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv6_1);
-        state_subtrees.push(CIDR_IPv6_2);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_7);
-        cert_subtrees.push(CIDR_IPv4_6);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv6_1);
-        expected_subtrees.push(CIDR_IPv4_7);
-        // Intersection among heterogeneous names should not affect their span
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
+    macro_rules! test_set_intersection {
+        ($($($left_item: expr)*, $($right_item: expr)*, $($expected_item: expr)*);*) => {
+            #[test]
+            fn test_set_intersection_method() {
+                $(
+                    let mut state_subtrees: Vec<GeneralName> = Vec::new();
+                    $(
+                        state_subtrees.push($left_item);
+                    )*
+                    let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+                    $(
+                        cert_subtrees.push($right_item);
+                    )*
+                    let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+                    $(
+                        expected_subtrees.push($expected_item);
+                    )*
+                    get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+                    // A very lazy way to check content equality
+                    // Wrong permutation will be rejected
+                    // although permutation of subtrees should not affect the correctness
+                    assert_eq!(
+                        state_subtrees,
+                        expected_subtrees
+                    );
+                )*
+            }
+        };
     }
 
-    #[test]
-    fn test_ipv4_ipv6_mix_union() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv6_1);
-        state_subtrees.push(CIDR_IPv6_2);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv4_7);
-        cert_subtrees.push(CIDR_IPv4_6);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv6_1);
-        expected_subtrees.push(CIDR_IPv4_7);
-        // Union among heterogeneous names should not affect their span
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
+    macro_rules! test_set_union {
+        ($($($left_item: expr)*, $($right_item: expr)*, $($expected_item: expr)*);*) => {
+            #[test]
+            fn test_set_union_method() {
+                $(
+                    let mut state_subtrees: Vec<GeneralName> = Vec::new();
+                    $(
+                        state_subtrees.push($left_item);
+                    )*
+                    let mut cert_subtrees: Vec<GeneralName> = Vec::new();
+                    $(
+                        cert_subtrees.push($right_item);
+                    )*
+                    let mut expected_subtrees: Vec<GeneralName> = Vec::new();
+                    $(
+                        expected_subtrees.push($expected_item);
+                    )*
+                    get_subtree_union(&mut state_subtrees, &cert_subtrees);
+                    // A very lazy way to check content equality
+                    // Wrong permutation will be rejected
+                    // although permutation of subtrees should not affect the correctness
+                    assert_eq!(
+                        state_subtrees,
+                        expected_subtrees
+                    );
+                )*
+            }
+        };
     }
 
-    // Cross intersecting/union
-    #[test]
-    fn test_ipv4_ipv6_cross_intersection() {
-        init();
+    test_set_intersection!(
+        // Example from RFC 5280 section 6
+        DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM, DNS_FOO_EXAMPLE;
+        DNS_EXAMPLE_COM, DNS_EXAMPLE_NET, DNS_EMPTY;
+        DNS_EXAMPLE_COM, DNS_FOO_EXAMPLE DNS_EXAMPLE_NET, DNS_FOO_EXAMPLE;
+        // Intersection between DNS set and empty set
+        DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EMPTY, DNS_EMPTY;
+        DNS_EMPTY, DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EMPTY;
+        DNS_EXAMPLE_COM DNS_FOO_EXAMPLE DNS_EXAMPLE_NET, DNS_EMPTY, DNS_EMPTY;
+        DNS_EMPTY, DNS_EXAMPLE_COM DNS_FOO_EXAMPLE DNS_EXAMPLE_NET, DNS_EMPTY;
+        // Intersection between DNS set and unspecified set
+        DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, , DNS_EXAMPLE_COM;
+        , DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM;
+        // Intersection between subset and superset
+        CIDR_IPv4_1, CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_2;
+        CIDR_IPv4_1 CIDR_IPv4_2, CIDR_IPv4_3, CIDR_IPv4_3;
+        CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_1, CIDR_IPv4_2;
+        CIDR_IPv4_3, CIDR_IPv4_1 CIDR_IPv4_2, CIDR_IPv4_3;
+        // Intersection between disjoint set
+        CIDR_IPv4_1, CIDR_IPv4_4, CIDR_IPv4_NONE;
+        CIDR_IPv4_4, CIDR_IPv4_1, CIDR_IPv4_NONE;
+        // Intersection between empty subtrees and other subtrees (Domination law)
+        CIDR_IPv4_NONE, CIDR_IPv4_7, CIDR_IPv4_NONE;
+        CIDR_IPv4_NONE, CIDR_IPv4_2, CIDR_IPv4_NONE;
+        CIDR_IPv4_NONE, CIDR_IPv4_NONE, CIDR_IPv4_NONE;
+        // Multiple IPv4 intersection
+        CIDR_IPv4_5 CIDR_IPv4_6, CIDR_IPv4_7 CIDR_IPv4_8, CIDR_IPv4_6;
+        // Heterogeneous cross intersection
+        CIDR_IPv6_1 CIDR_IPv4_7, CIDR_IPv6_2 CIDR_IPv4_6, CIDR_IPv6_2 CIDR_IPv4_6;
+        // Adding a disjoint IPv6 on state subtrees should not alter intersection result
+        CIDR_IPv6_1 CIDR_IPv4_7 CIDR_IPv6_3, CIDR_IPv6_2 CIDR_IPv4_6, CIDR_IPv6_2 CIDR_IPv4_6;
+        // Heterogeneous disjoint intersection, effectively self union
+        CIDR_IPv6_1 CIDR_IPv6_2, CIDR_IPv4_7 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7
+    );
 
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv6_1);
-        state_subtrees.push(CIDR_IPv4_7);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv6_2);
-        cert_subtrees.push(CIDR_IPv4_6);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv6_2);
-        expected_subtrees.push(CIDR_IPv4_6);
-        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
-
-    #[test]
-    fn test_ipv4_ipv6_cross_union() {
-        init();
-
-        let mut state_subtrees: Vec<GeneralName> = Vec::new();
-        state_subtrees.push(CIDR_IPv6_1);
-        state_subtrees.push(CIDR_IPv4_7);
-        let mut cert_subtrees: Vec<GeneralName> = Vec::new();
-        cert_subtrees.push(CIDR_IPv6_2);
-        cert_subtrees.push(CIDR_IPv4_6);
-        let mut expected_subtrees: Vec<GeneralName> = Vec::new();
-        expected_subtrees.push(CIDR_IPv6_1);
-        expected_subtrees.push(CIDR_IPv4_7);
-        get_subtree_union(&mut state_subtrees, &cert_subtrees);
-        assert_eq!(
-            state_subtrees,
-            expected_subtrees
-        );
-    }
+    test_set_union!(
+        // Example from RFC 5280 section 6
+        DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM, DNS_EXAMPLE_COM;
+        DNS_EXAMPLE_COM, DNS_EXAMPLE_NET, DNS_EXAMPLE_COM DNS_EXAMPLE_NET;
+        DNS_EXAMPLE_COM, DNS_FOO_EXAMPLE DNS_EXAMPLE_NET, DNS_EXAMPLE_COM DNS_EXAMPLE_NET;
+        // Union between DNS set and empty set
+        DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EMPTY, DNS_EXAMPLE_COM;
+        DNS_EMPTY, DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM;
+        DNS_EXAMPLE_COM DNS_FOO_EXAMPLE DNS_EXAMPLE_NET, DNS_EMPTY, DNS_EXAMPLE_COM DNS_EXAMPLE_NET;
+        DNS_EMPTY, DNS_EXAMPLE_COM DNS_FOO_EXAMPLE DNS_EXAMPLE_NET, DNS_EXAMPLE_COM DNS_EXAMPLE_NET;
+        // Union between DNS set and unspecified set
+        DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, , DNS_EXAMPLE_COM;
+        , DNS_EXAMPLE_COM DNS_FOO_EXAMPLE, DNS_EXAMPLE_COM;
+        // Union between subset and superset
+        CIDR_IPv4_1, CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_1;
+        CIDR_IPv4_1 CIDR_IPv4_3, CIDR_IPv4_2, CIDR_IPv4_1;
+        CIDR_IPv4_2 CIDR_IPv4_3, CIDR_IPv4_1, CIDR_IPv4_1;
+        CIDR_IPv4_2, CIDR_IPv4_1 CIDR_IPv4_3, CIDR_IPv4_1;
+        // Union between empty subtrees and other subtrees (Identity law)
+        CIDR_IPv4_NONE, CIDR_IPv4_1, CIDR_IPv4_1;
+        CIDR_IPv4_NONE, CIDR_IPv4_6, CIDR_IPv4_6;
+        CIDR_IPv4_NONE, CIDR_IPv4_NONE, CIDR_IPv4_NONE;
+        // Multiple IPv4 intersection
+        CIDR_IPv4_5 CIDR_IPv4_6, CIDR_IPv4_7 CIDR_IPv4_8, CIDR_IPv4_5 CIDR_IPv4_7 CIDR_IPv4_8;
+        // Heterogeneous cross union
+        CIDR_IPv6_1 CIDR_IPv4_7, CIDR_IPv6_2 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7;
+        // Adding a disjoint IPv6 on state subtrees should mean appending the disjoin subtree
+        CIDR_IPv6_1 CIDR_IPv6_3 CIDR_IPv4_7, CIDR_IPv6_2 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv6_3 CIDR_IPv4_7;
+        // Heterogeneous disjoint union, effectively self union
+        CIDR_IPv6_1 CIDR_IPv6_2, CIDR_IPv4_7 CIDR_IPv4_6, CIDR_IPv6_1 CIDR_IPv4_7
+    );
 }
