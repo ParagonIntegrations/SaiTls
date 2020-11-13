@@ -1882,5 +1882,37 @@ mod test {
         expected_subtrees.push(specific_general_name.clone());
         get_subtree_union(&mut state_subtrees, &cert_subtrees);
         assert_eq!(state_subtrees, expected_subtrees);
+
+        // Intersection / Union with permutated name
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(broad_general_name.clone());
+        state_subtrees.push(specific_general_name.clone());
+        cert_subtrees.push(permutated_general_name.clone());
+        expected_subtrees.push(broad_general_name.clone());
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(broad_general_name.clone());
+        cert_subtrees.push(permutated_general_name.clone());
+        cert_subtrees.push(disjoint_general_name.clone());
+        expected_subtrees.push(permutated_general_name.clone());
+        expected_subtrees.push(disjoint_general_name.clone());
+        get_subtree_union(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
+
+        // DirectoryName operation with empty list
+        state_subtrees.clear();
+        cert_subtrees.clear();
+        expected_subtrees.clear();
+        state_subtrees.push(broad_general_name.clone());
+        state_subtrees.push(specific_general_name.clone());
+        expected_subtrees.push(broad_general_name.clone());
+        get_subtree_intersection(&mut state_subtrees, &cert_subtrees);
+        assert_eq!(state_subtrees, expected_subtrees);
     }
 }
