@@ -29,12 +29,22 @@ use byteorder::{ByteOrder, NetworkEndian};
 use core::convert::TryFrom;
 use core::convert::TryInto;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Certificate<'a> {
     pub tbs_certificate: TBSCertificate<'a>,
     pub signature_algorithm: AlgorithmIdentifier<'a>,
     pub signature_value: &'a [u8],
     pub tbs_certificate_encoded: &'a [u8],
+}
+
+impl<'a> core::fmt::Debug for Certificate<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Certificate")
+            .field("tbs_certificate", &self.tbs_certificate)
+            .field("signature_algorithm", &self.signature_algorithm)
+            .field("signature_value", &self.signature_value)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -540,27 +550,25 @@ pub struct AttributeTypeAndValue<'a> {
 
 impl<'a> Certificate<'a> {
     // General return public key method
-    pub(crate) fn get_cert_public_key(&self) -> Result<CertificatePublicKey, ()> {
+    pub fn get_cert_public_key(&self) -> Result<CertificatePublicKey, ()> {
         let public_key_info = &self.tbs_certificate.subject_public_key_info;
         let algorithm_identifier = &public_key_info.algorithm;
+        log::info!("sig alg ident: {:?}", algorithm_identifier);
 
         // 3 possibilities: RSA_ENCRYPTION, ID_EC_PUBLIC_KEY, and EdDSA25519
         match algorithm_identifier.algorithm {
-            RSA_ENCRYPTION => {
-                log::info!("Chose rsa encryption");
-                log::info!("Entire key: {:X?}", self.tbs_certificate.subject_public_key_info.subject_public_key);
+            RSA_ENCRYPTION | ID_RSASSA_PSS => {
                 let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
                     self.tbs_certificate.subject_public_key_info.subject_public_key
                 ).map_err(|_| ())?;
-                log::info!("Modulus: {:X?}\n, Exponent: {:X?}", modulus, exponent);
 
-                log::info!("Big int modulus: {:?}", BigUint::from_bytes_be(modulus));
+                log::info!("Mod: {:?}, exp: {:?}", modulus, exponent);
         
                 let public_key = RSAPublicKey::new(
                     BigUint::from_bytes_be(modulus),
                     BigUint::from_bytes_be(exponent)
                 ).map_err(|_| ())?;
-                log::info!("Got rsa key parts");
+
                 Ok(
                     CertificatePublicKey::RSA {
                         cert_rsa_public_key: public_key
@@ -576,8 +584,6 @@ impl<'a> Certificate<'a> {
                 if ec_oid != PRIME256V1 {
                     return Err(());
                 }
-                log::info!("Acceptable OID");
-                log::info!("Public key into slice: {:X?}", &public_key_info.subject_public_key[1..]);
                 let p256_verify_key = p256::ecdsa::VerifyKey::from_encoded_point(
                     &p256::EncodedPoint::from_untagged_bytes(
                         GenericArray::from_slice(
@@ -585,7 +591,6 @@ impl<'a> Certificate<'a> {
                         )
                     )
                 ).map_err(|_| ())?;
-                log::info!("Have verify key");
                 Ok(
                     CertificatePublicKey::ECDSA_SECP256R1_SHA256 {
                         cert_verify_key: p256_verify_key
@@ -611,6 +616,7 @@ impl<'a> Certificate<'a> {
     pub fn validate_self_signed_signature(&self) -> Result<(), TlsError> {
         let cert_public_key = self.get_cert_public_key()
             .map_err(|_| TlsError::SignatureValidationError)?;
+        log::info!("Own public key: {:?}", cert_public_key);
         self.validate_signature_with_trusted(&cert_public_key)
     }
 
@@ -624,6 +630,7 @@ impl<'a> Certificate<'a> {
         let sig_alg = self.signature_algorithm.algorithm;
 
         // Prepare hash value
+        log::info!("sig alg: {:?}", sig_alg);
         match sig_alg {
             SHA1_WITH_RSA_ENCRYPTION => {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA1));
@@ -679,6 +686,7 @@ impl<'a> Certificate<'a> {
                 let (_, (hash_alg, salt_len)) = parse_rsa_ssa_pss_parameters(
                     self.signature_algorithm.parameters
                 ).unwrap();
+                log::info!("Hash alg, salt_len: {:X?}, {:X?}", hash_alg, salt_len);
                 match hash_alg {
                     ID_SHA1 => {
                         let padding = PaddingScheme::new_pss_with_salt::<Sha1, FakeRandom>(
@@ -707,12 +715,15 @@ impl<'a> Certificate<'a> {
                     },
 
                     ID_SHA256 => {
+                        log::info!("Selected SHA256 with salt length: {:?}", salt_len);
                         let padding = PaddingScheme::new_pss_with_salt::<Sha256, FakeRandom>(
                             FakeRandom {},
                             salt_len
                         );
                         let hashed = Sha256::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
+                        log::info!("signature: {:X?}", sig);
+                        log::info!("Trusted key: {:?}", trusted_public_key);
                         trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
@@ -752,8 +763,8 @@ impl<'a> Certificate<'a> {
 
             // ECDSA signature algorithm (support only `edcsa_secp256r1_sha256`)
             ECDSA_WITH_SHA256 => {
-                let (_, (r, s)) = parse_ecdsa_signature(self.signature_value)
-                    .map_err(|_| TlsError::SignatureValidationError)?;
+                // let (_, (r, s)) = parse_ecdsa_signature(self.signature_value)
+                //     .map_err(|_| TlsError::SignatureValidationError)?;
                 let sig = p256::ecdsa::Signature::from_asn1(self.signature_value)
                     .map_err(|_| TlsError::SignatureValidationError)?;
                 trusted_public_key.get_ecdsa_secp256r1_sha256_verify_key()
@@ -779,6 +790,7 @@ impl<'a> Certificate<'a> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ValidPolicyNode<'a> {
     valid_policy: &'a [u8],
     qualifier_set: &'a [u8],
@@ -838,17 +850,21 @@ pub fn verify_certificate_chain(
     let mut max_path_length = certificates.len();
 
     for cert_index in 0..certificates.len() {
+        log::trace!("Processing certificate {:?}", cert_index);
         let current_certificate = &certificates[cert_index];
         current_certificate
             .validate_signature_with_trusted(&working_public_key)
             .map_err(|_| TlsError::SignatureValidationError)?;
+        log::trace!("Certificate signature verified");
         current_certificate.tbs_certificate.validity
             .is_valid(&current_time)?;
+        log::trace!("Certificate time is within limit");
         // Certificate Revocation List is not implemented
         // This is a certificate-in-certificate scenario
         if current_certificate.tbs_certificate.issuer != working_issuer_name {
             return Err(TlsError::CertificateIssuerMismatch);
         }
+        log::trace!("Certificate name is verified");
 
         // (b, c) If certificate is self-issued and not the end-entity certificate,
         // verify that subject name is
@@ -859,7 +875,7 @@ pub fn verify_certificate_chain(
         // - within one of the permitted_subtrees for that type
         // - not within any of the excluded_subtrees for that name type
         if current_certificate.tbs_certificate.issuer != current_certificate.tbs_certificate.subject
-            && (cert_index + 1) != certificates.len() {
+            || (cert_index + 1) == certificates.len() {
 
             /*
              * Permitted subtreee block
@@ -945,6 +961,8 @@ pub fn verify_certificate_chain(
                 }
             }
 
+            log::trace!("Subject name and SAN prmitted");
+
             /*
              * Excluded subtrees block
              */
@@ -986,6 +1004,8 @@ pub fn verify_certificate_chain(
                     }
                 }
             }
+
+            log::trace!("Subject name and SAN not excluded");
         }
 
         // Certificate policy, find a new set of leaves if exist
@@ -1027,7 +1047,7 @@ pub fn verify_certificate_chain(
                         policy_not_matched = false;
                     }
     
-                    if policy_parent.valid_policy == crate::oid::ANY_POLICY {
+                    if policy_parent.valid_policy == ANY_POLICY {
                         any_policy_found = true;
                     }
                 }
@@ -1038,7 +1058,7 @@ pub fn verify_certificate_chain(
                 // There is no need to add more than once
                 // Only `horizontal` leaf search will be performed,
                 // will only duplicate branch
-                if !policy_not_matched && any_policy_found {
+                if policy_not_matched && any_policy_found {
                     let mut new_node = ValidPolicyNode {
                         valid_policy: policy.id,
                         qualifier_set: policy.qualifier,
@@ -1056,6 +1076,7 @@ pub fn verify_certificate_chain(
                 && inhibit_any_policy > 0
                 && cert_index + 1 < certificates.len()
             {
+                log::trace!("Can add any policy to policy tree");
                 for policy_parent in valid_policy_tree.iter() {
                     for expected_policy in policy_parent.expected_policy_set.iter() {
                         // If any expected policy cannot be found among the new leaves
@@ -1083,6 +1104,7 @@ pub fn verify_certificate_chain(
         // (d) prune childless branches, and
         // (e) set the entire tree to NULL, if there are no cert policies.
         valid_policy_tree = new_valid_policy_leaves;
+        log::trace!("Policy tree: {:?}", valid_policy_tree);
 
         // (f) Verify that either:
         // -`explicit_policy` is greater than 0, OR
@@ -1435,22 +1457,22 @@ fn get_subtree_intersection<'a>(
             // Should both names be homogeneous, it should imply an all-blocking name
             else {
                 match (self_name, other_name) {
-                    (GeneralName::URI(self_uri), GeneralName::URI(other_uri)) => {
+                    (GeneralName::URI(..), GeneralName::URI(..)) => {
                         preserved_subtrees.push(
                             GeneralName::URI(&[])
                         )
                     },
-                    (GeneralName::RFC822Name(self_mail), GeneralName::RFC822Name(other_mail)) => {
+                    (GeneralName::RFC822Name(..), GeneralName::RFC822Name(..)) => {
                         preserved_subtrees.push(
                             GeneralName::RFC822Name(&[])
                         )
                     },
-                    (GeneralName::DNSName(self_dns), GeneralName::DNSName(other_dns)) => {
+                    (GeneralName::DNSName(..), GeneralName::DNSName(..)) => {
                         preserved_subtrees.push(
                             GeneralName::DNSName(&[])
                         )
                     },
-                    (GeneralName::IPAddress(self_ip), GeneralName::IPAddress(other_ip)) => {
+                    (GeneralName::IPAddress(..), GeneralName::IPAddress(..)) => {
                         preserved_subtrees.push(
                             GeneralName::IPAddress(&[])
                         )

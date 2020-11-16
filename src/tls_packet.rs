@@ -251,6 +251,7 @@ pub(crate) enum HandshakeData<'a> {
     EncryptedExtensions(EncryptedExtensions),
     Certificate(Certificate<'a>),
     CertificateVerify(CertificateVerify<'a>),
+    CertificateRequest(CertificateRequest<'a>),
     Finished(Finished<'a>),
 }
 
@@ -800,4 +801,12 @@ pub(crate) struct CertificateVerify<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct Finished<'a> {
     pub(crate) verify_data: &'a [u8]
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CertificateRequest<'a> {
+    pub(crate) certificate_request_context_length: u8,
+    pub(crate) certificate_request_context: &'a [u8],
+    pub(crate) extensions_length: u16,
+    pub(crate) extensions: Vec<Extension>,
 }

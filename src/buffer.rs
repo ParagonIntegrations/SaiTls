@@ -180,12 +180,6 @@ impl<'a> TlsBuffer<'a> {
                 }
             },
             KeyShareEntry(k) => {
-                let key_share_entry_into = |buffer: &mut TlsBuffer, entry: crate::tls_packet::KeyShareEntry| {
-                    buffer.write_u16(entry.group.into())?;
-                    buffer.write_u16(entry.length)?;
-                    buffer.write(entry.key_exchange.as_slice())
-                };
-
                 use crate::tls_packet::KeyShareEntryContent::*;
                 match k {
                     KeyShareClientHello { length, client_shares } => {
@@ -256,8 +250,8 @@ macro_rules! export_byte_order_fn {
 
 export_byte_order_fn!(
     write_u16,  read_u16,   u16,    2,
-    write_u24,  read_u24,   u32,    3,
-    write_u32,  read_u32,   u32,    4,
-    write_u48,  read_u48,   u64,    6,
-    write_u64,  read_u64,   u64,    8
+    write_u24,  read_u24,   u32,    3
+    // write_u32,  read_u32,   u32,    4,
+    // write_u48,  read_u48,   u64,    6,
+    // write_u64,  read_u64,   u64,    8
 );

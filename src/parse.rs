@@ -113,11 +113,6 @@ pub(crate) fn parse_inner_plaintext_for_handshake(bytes: &[u8]) -> IResult<&[u8]
             )(remaining_bytes)?;
             return Ok((
                 &[],
-                // // A concatenation of all handshakes received
-                // // The remaining content_type byte and zero paddings are stripped
-                // &bytes[
-                //     ..(bytes.len()-remaining_bytes.len())
-                // ], 
                 handshake_vec
             ));
         }
@@ -155,11 +150,8 @@ pub(crate) fn get_content_type_inner_plaintext(inner_plaintext: &[u8]) -> (TlsCo
     )
 }
 
-// TODO: Redo EE
-// Not very appropriate to classify EE as proper handshake
-// It may include multiple handshakes
-// Solution 1: Parse handshake again -> Recursion & return type
-// Solution 2: Force caller to parse in a loop -> Extra parser to handle EE
+// Turn bytes into a handshake struct
+// Will return trailing bytes, if too much bytes were supplied
 pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
     let handshake_type = take(1_usize);
     let length = take(3_usize);
@@ -186,6 +178,17 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
                     rest
                 )?;
                 repr.handshake_data = HandshakeData::EncryptedExtensions(
+                    handshake_data
+                );
+
+                Ok((rest, repr))
+            },
+            CertificateRequest => {
+                // Process certificate request
+                let (rest, handshake_data) = parse_certificate_request(
+                    rest
+                )?;
+                repr.handshake_data = HandshakeData::CertificateRequest(
                     handshake_data
                 );
 
@@ -327,6 +330,42 @@ fn parse_encrypted_extensions(bytes: &[u8]) -> IResult<&[u8], EncryptedExtension
     )(rest)?;
 
 	Ok((rest, encrypted_extensions))
+}
+
+fn parse_certificate_request(bytes: &[u8]) -> IResult<&[u8], CertificateRequest> {
+    let (rest, certificate_request_context_length) = take(1_usize)(bytes)?;
+    let certificate_request_context_length = certificate_request_context_length[0];
+
+    let (rest, certificate_request_context) = take(
+        certificate_request_context_length
+    )(rest)?;
+
+    let (rest, extensions_length) = take(2_usize)(rest)?;
+    let extensions_length = NetworkEndian::read_u16(extensions_length);
+    let (rest, mut extensions_data) = take(extensions_length)(rest)?;
+
+    let mut extensions: Vec<Extension> = Vec::new();
+
+    while extensions_data.len() != 0 {
+        let (rem, extension) = parse_extension(
+            extensions_data,
+            HandshakeType::CertificateRequest
+        )?;
+        extensions_data = rem;
+        extensions.push(extension);
+    }
+
+    let certificate_request = CertificateRequest {
+        certificate_request_context_length,
+        certificate_request_context,
+        extensions_length,
+        extensions
+    };
+
+    Ok((
+        rest,
+        certificate_request
+    ))
 }
 
 fn parse_handshake_certificate(bytes: &[u8]) -> IResult<&[u8], Certificate> {
@@ -675,7 +714,6 @@ pub fn parse_asn1_der_tbs_certificate(bytes: &[u8]) -> IResult<&[u8], Asn1DerTBS
         ))
     )(value)?;
 
-    log::info!("Parsed tbscert");
     let version = version.unwrap_or(Asn1DerVersion::v1);
     let extensions = extensions.unwrap_or(
         Asn1DerExtensions { extensions: Vec::new() }
@@ -931,14 +969,16 @@ pub fn parse_ans1_der_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>
 pub fn parse_asn1_der_utc_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>> {
 
     // Buffer for building string
+    // Need 19 characters to store the whole UTC time,
+    // and parsible by `chrono` parser
     let mut string: String<U19> = String::new();
 
     // Decide the appropriate century (1950 to 2049)
     let year_tag: u8 = core::str::from_utf8(&bytes[..2]).unwrap().parse().unwrap();
     if year_tag < 50 {
-        string.push_str("20");
+        string.push_str("20").unwrap();
     } else {
-        string.push_str("19");
+        string.push_str("19").unwrap();
     }
 
     // Take out YYMMDDhhmm first
@@ -950,7 +990,8 @@ pub fn parse_asn1_der_utc_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOff
         (rest, seconds)
     } else {
         string.push_str("00").unwrap();
-        // The second parameter will not be used anymore
+        // The second parameter will not be used anymore,
+        // putting `rest` is an arbitrary choice
         (rest, rest)
     };
     match rest[0] as char {
@@ -960,7 +1001,7 @@ pub fn parse_asn1_der_utc_time(bytes: &[u8]) -> IResult<&[u8], DateTime<FixedOff
         _ => {
             string.push_str(core::str::from_utf8(rest).unwrap())
         }
-    };
+    }.unwrap();
 
     Ok((
         &[],
@@ -1028,8 +1069,6 @@ pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], As
             parse_asn1_der_bit_string,
         ))
     )(value)?;
-    log::info!("Parsed subject key alg ident: {:?}", algorithm);
-    log::info!("Parsed key: {:X?}", subject_public_key);
     Ok((
         rest,
         Asn1DerSubjectPublicKeyInfo {
@@ -1041,7 +1080,6 @@ pub fn parse_asn1_der_subject_key_public_info(bytes: &[u8]) -> IResult<&[u8], As
 
 // Parser for extensions (Context-specific Sequence: 0xA3, then universal Sequence: 0x30)
 pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensions> {
-    log::info!("Invoked extension parsing");
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0xA3
     if tag_val != 0xA3 {
@@ -1071,7 +1109,6 @@ pub fn parse_asn1_der_extensions(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtensio
 
 // Parser for an extension (Sequence: 0x30)
 pub fn parse_asn1_der_extension(bytes: &[u8]) -> IResult<&[u8], Asn1DerExtension> {
-    log::info!("Extension: {:X?}\n", bytes);
     let (rest, (tag_val, _, value)) = parse_asn1_der_object(bytes)?;
     // Verify the tag_val is indeed 0x30
     if tag_val != 0x30 {
@@ -1183,7 +1220,6 @@ pub fn parse_asn1_der_subject_alternative_name(bytes: &[u8]) -> IResult<&[u8], A
     let mut general_names: Vec<Asn1DerGeneralName> = Vec::new();
 
     while names.len() != 0 {
-        log::info!("Name bytes: {:X?}\nLength: {:?}\n", names, names.len());
         let (rest, general_name) = parse_asn1_der_general_name(names)?;
 
         general_names.push(general_name);
@@ -1210,7 +1246,6 @@ pub fn parse_asn1_der_general_name(bytes: &[u8]) -> IResult<&[u8], Asn1DerGenera
             if inner_tag_val != 0xA0 {
                 return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
             }
-            log::info!("Parsed inner tag");
             // Further parse the value into an ASN.1 DER object
             let (_, (_, _, name_value)) = complete(
                 parse_asn1_der_object
@@ -1588,6 +1623,7 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
     }
     
     // Parse as RSASSA-PSS-params (Sequence: 0x30)
+    log::info!("sig_alg sequence: {:X?}", params);
     let (_, rsa_ssa_params) = complete(
         parse_asn1_der_sequence
     )(params)?;
@@ -1599,7 +1635,9 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
             opt(parse_salt_length),
             opt(parse_trailer_field)
         ))
-    )(params)?;
+    )(rsa_ssa_params)?;
+
+    log::info!("Parser hash algorithm: {:?}", hash_alg);
 
     let hash_alg = hash_alg.unwrap_or(
         Asn1DerAlgId { algorithm: ID_SHA1, parameters: &[] }
@@ -1633,6 +1671,7 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
 
 fn parse_hash_algorithm(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
     // Parse HashAlgorithm [0]
+    log::info!("Hash algorithm: {:X?}", bytes);
     let (rest, (tag_val, _, hash_alg)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0xA0
     if tag_val != 0xA0 {
@@ -1640,6 +1679,7 @@ fn parse_hash_algorithm(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
     }
     // Parse the encapsulated algorithm identifier, force completeness
     let (_, hash_alg) = complete(parse_asn1_der_algorithm_identifier)(hash_alg)?;
+    log::info!("Parsed hash algorithm {:?}", hash_alg);
     Ok((
         rest, hash_alg
     ))

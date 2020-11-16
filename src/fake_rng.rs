@@ -17,9 +17,9 @@ impl RngCore for FakeRandom {
         0
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {}
+    fn fill_bytes(&mut self, _dest: &mut [u8]) {}
 
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Error> {
+    fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), Error> {
         Ok(())
     }
 }

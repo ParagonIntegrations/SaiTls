@@ -213,13 +213,8 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         let tls_repr_vec_size = tls_repr_vec.len();
         for _index in 0..tls_repr_vec_size {
             let (repr_slice, mut repr) = tls_repr_vec.remove(0);
-            // TODO:
-            // Check TLS content type
-            // If application data, decrypt before process.
-            // If there are multiple handshakes within a record,
-            //     give each of them a unique TLS record wrapper and process
-            //     If a pure application data is found, sliently ignore
-            // Otherwise process directly
+
+            // Process record base on content type
             log::info!("Record type: {:?}", repr.content_type);
             if repr.content_type == TlsContentType::ApplicationData {
                 log::info!("Found application data");
@@ -241,7 +236,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                         &associated_data,
                         &mut app_data
                     ).unwrap();
-                    // log::info!("Decypted data: {:?}", app_data);
                     session.increment_server_sequence_number();
                 }
 
@@ -298,10 +292,8 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         // Drop the message and update `received_change_cipher_spec`
         // Note: CSS doesn't count as a proper record, no need to increment sequence number
         if repr.is_change_cipher_spec() {
-            log::info!("Change Cipher Spec");
             let mut session = self.session.try_borrow_mut().expect("Cannot borrow mut");
             session.receive_change_cipher_spec();
-            log::info!("Changed Cipher Spec");
             return Ok(())
         }
 
@@ -311,7 +303,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         match tls_state {
             // During WAIT_SH for a TLS client, client should wait for ServerHello
             TlsState::WAIT_SH => {
-                // TODO: Validate SH
                 if repr.is_server_hello() {
                     // Check SH content:
                     // random: Cannot represent HelloRequestRetry
@@ -429,7 +420,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             // Expect encrypted extensions after receiving SH
             TlsState::WAIT_EE => {
                 // Verify that it is indeed an EE
-                // let might_be_ee = handshake_vec.remove(0);
                 let might_be_ee = repr.handshake.take().unwrap();
                 if might_be_ee.get_msg_type() != HandshakeType::EncryptedExtensions {
                     // Process the other handshakes in "handshake_vec"
@@ -460,14 +450,17 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             // Parse the certificate and check its content
             TlsState::WAIT_CERT_CR => {
                 // Verify that it is indeed an Certificate
-                // let might_be_cert = handshake_vec.remove(0);
                 let might_be_cert = repr.handshake.take().unwrap();
                 if might_be_cert.get_msg_type() != HandshakeType::Certificate {
                     // Process the other handshakes in "handshake_vec"
                     todo!()
                 }
 
-                // TODO: Process Certificate
+                // let all_certificates = might_be_cert.get_all_asn1_der_certificates().unwrap();
+                // log::info!("Number of certificates: {:?}", all_certificates.len());
+                // log::info!("All certificates: {:?}", all_certificates);
+
+                // TODO: Process all certificates
                 let cert = might_be_cert.get_asn1_der_certificate().unwrap();
 
                 // TODO: Replace this block after implementing a proper 
@@ -523,7 +516,6 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             // Client will receive a Finished handshake from server
             TlsState::WAIT_FINISHED => {
                 // Ensure that it is Finished
-                // let might_be_server_finished = handshake_vec.remove(0);
                 let might_be_server_finished = repr.handshake.take().unwrap();
                 if might_be_server_finished.get_msg_type() != HandshakeType::Finished {
                     // Process the other handshakes in "handshake_vec"
@@ -748,10 +740,8 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             + 16                                // Auth tag length
         );
 
-        // TODO: Dynamically size typed Heapless Vec on socket instantiation,
-        // just like MiniMQ
         let mut vec: HeaplessVec<u8, U1024> = HeaplessVec::from_slice(data).unwrap();
-        vec.push(0x17);     // Content type
+        vec.push(0x17).unwrap();                // Content type
         
         let mut session = self.session.borrow_mut();
         let tag = session.encrypt_application_data_in_place_detached(

@@ -536,7 +536,7 @@ impl Session {
         use crate::tls_packet::SignatureScheme::*;
 
         let get_rsa_padding_scheme = |sig_alg: SignatureScheme| -> PaddingScheme {
-            match signature_algorithm {
+            match sig_alg {
                 rsa_pkcs1_sha256 => {
                     PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_256))
                 },
@@ -1313,7 +1313,7 @@ impl Hash {
 
     pub(crate) fn select_sha256(self) -> Self {
         match self {
-            Self::Undetermined { sha256, sha384 } => {
+            Self::Undetermined { sha256, .. } => {
                 Self::Sha256 {
                     sha256
                 }
@@ -1324,7 +1324,7 @@ impl Hash {
 
     pub(crate) fn select_sha384(self) -> Self {
         match self {
-            Self::Undetermined { sha256, sha384 } => {
+            Self::Undetermined { sha384, .. } => {
                 Self::Sha384 {
                     sha384
                 }
@@ -1465,22 +1465,23 @@ impl Cipher {
 
     pub(crate) fn get_cipher_suite_type(&self) -> CipherSuite {
         match self {
-            Cipher::Aes128Gcm { aes128gcm } => {
+            Cipher::Aes128Gcm { .. } => {
                 CipherSuite::TLS_AES_128_GCM_SHA256
             },
-            Cipher::Aes256Gcm { aes256gcm } => {
+            Cipher::Aes256Gcm { .. } => {
                 CipherSuite::TLS_AES_256_GCM_SHA384
             },
-            Cipher::Chacha20poly1305 { chacha20poly1305 } => {
+            Cipher::Chacha20poly1305 { .. } => {
                 CipherSuite::TLS_CHACHA20_POLY1305_SHA256
             },
-            Cipher::Ccm { ccm } => {
+            Cipher::Ccm { .. } => {
                 CipherSuite::TLS_AES_128_CCM_SHA256
             }
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum CertificatePublicKey {
     RSA {
         cert_rsa_public_key: RSAPublicKey

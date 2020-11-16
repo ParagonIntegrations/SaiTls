@@ -36,7 +36,7 @@ where
     //      suffix: at most 12 chars as per RFC8446, section 7.1
     let mut label_string: String<U32> = String::new();
     label_string.push_str("tls13 ").unwrap();
-    label_string.push_str(label);
+    label_string.push_str(label).unwrap();
 
     let length = u16::try_from(Hash::output_size()).unwrap();
     let label_length = u8::try_from(label_string.len()).unwrap();
@@ -55,7 +55,7 @@ where
     //      context_vec: 48 bytes for SHA384 + 1 byte (len)
     let mut array = [0; 100];
     let mut buffer = TlsBuffer::new(&mut array);
-    buffer.enqueue_hkdf_label(hkdf_label);
+    buffer.enqueue_hkdf_label(hkdf_label).unwrap();
     let info: &[u8] = buffer.into();
 
     // Define output key material (OKM), dynamically sized by hash
@@ -81,7 +81,7 @@ where
     //      suffix: at most 12 chars as per RFC8446, section 7.1
     let mut label_string: String<U32> = String::new();
     label_string.push_str("tls13 ").unwrap();
-    label_string.push_str(label);
+    label_string.push_str(label).unwrap();
     let label_length = u8::try_from(label_string.len()).unwrap();
 
     let context_slice = context.as_bytes();
