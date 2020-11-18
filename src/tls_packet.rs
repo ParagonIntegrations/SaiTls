@@ -216,6 +216,17 @@ impl<'a, 'b> HandshakeRepr<'a> {
             Err(())
         }
     }
+
+    pub(crate) fn get_cert_request_extensions(&self) -> Result<&Vec<Extension>, ()> {
+        if self.msg_type != HandshakeType::CertificateRequest {
+            return Err(())
+        };
+        if let HandshakeData::CertificateRequest(req) = &self.handshake_data {
+            Ok(&req.extensions)
+        } else {
+            Err(())
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -620,6 +631,10 @@ pub enum SignatureScheme {
     rsa_pss_pss_sha256 = 0x0809,
     rsa_pss_pss_sha384 = 0x080a,
     rsa_pss_pss_sha512 = 0x080b,
+
+    /* Bad value */
+    #[num_enum(default)]
+    illegal = 0xFFFF,
 }
 
 #[derive(Debug, Clone)]
