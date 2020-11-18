@@ -599,6 +599,36 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
                     _ => todo!()
                 }
             },
+            SignatureAlgorithms => {
+                let (rest, supported_signature_algorithm_length) =
+                    take(2_usize)(rest)?;
+                let supported_signature_algorithm_length =
+                    NetworkEndian::read_u16(supported_signature_algorithm_length);
+                
+                // Take the allocated extension bytes from rest
+                let (rest, mut algorithms) = take(
+                    supported_signature_algorithm_length
+                )(rest)?;
+
+                // Parse all algorithms
+                let mut supported_signature_algorithms: Vec<SignatureScheme> =
+                    Vec::new();
+                while algorithms.len() != 0 {
+                    let (rem, algorithm) = take(2_usize)(algorithms)?;
+                    let sig_alg = SignatureScheme::try_from(
+                        NetworkEndian::read_u16(algorithm)
+                    ).unwrap();
+                    algorithms = rem;
+                    supported_signature_algorithms.push(sig_alg);
+                }
+
+                let signature_scheme_list = crate::tls_packet::SignatureSchemeList {
+                    length: supported_signature_algorithm_length,
+                    supported_signature_algorithms
+                };
+
+                (rest, ExtensionData::SignatureAlgorithms(signature_scheme_list))
+            }
             _ => todo!()
         }        
     };
@@ -1623,7 +1653,6 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
     }
     
     // Parse as RSASSA-PSS-params (Sequence: 0x30)
-    log::info!("sig_alg sequence: {:X?}", params);
     let (_, rsa_ssa_params) = complete(
         parse_asn1_der_sequence
     )(params)?;
@@ -1636,8 +1665,6 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
             opt(parse_trailer_field)
         ))
     )(rsa_ssa_params)?;
-
-    log::info!("Parser hash algorithm: {:?}", hash_alg);
 
     let hash_alg = hash_alg.unwrap_or(
         Asn1DerAlgId { algorithm: ID_SHA1, parameters: &[] }
@@ -1657,7 +1684,7 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
         todo!()
     }
     let mut array_buffer: [u8; core::mem::size_of::<usize>()] = [0; core::mem::size_of::<usize>()];
-    array_buffer[(8-salt_len.len())..].clone_from_slice(salt_len);
+    array_buffer[(core::mem::size_of::<usize>()-salt_len.len())..].clone_from_slice(salt_len);
     let salt_len = usize::from_be_bytes(array_buffer);
 
     Ok((
@@ -1671,7 +1698,6 @@ pub fn parse_rsa_ssa_pss_parameters(params: &[u8]) -> IResult<&[u8], (&[u8], usi
 
 fn parse_hash_algorithm(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
     // Parse HashAlgorithm [0]
-    log::info!("Hash algorithm: {:X?}", bytes);
     let (rest, (tag_val, _, hash_alg)) = parse_asn1_der_object(bytes)?;
     // Verify the tag is indeed 0xA0
     if tag_val != 0xA0 {
@@ -1679,7 +1705,6 @@ fn parse_hash_algorithm(bytes: &[u8]) -> IResult<&[u8], Asn1DerAlgId> {
     }
     // Parse the encapsulated algorithm identifier, force completeness
     let (_, hash_alg) = complete(parse_asn1_der_algorithm_identifier)(hash_alg)?;
-    log::info!("Parsed hash algorithm {:?}", hash_alg);
     Ok((
         rest, hash_alg
     ))
