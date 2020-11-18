@@ -14,6 +14,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 use generic_array::GenericArray;
 
 use core::convert::TryFrom;
+use core::convert::TryInto;
 use core::cell::RefCell;
 
 use rand_core::{RngCore, CryptoRng};
@@ -52,19 +53,23 @@ pub(crate) enum TlsState {
 }
 
 // TODO: Group up all session_specific parameters into a separate structure
-pub struct TlsSocket<R: 'static + RngCore + CryptoRng>
+pub struct TlsSocket<'s, R: RngCore + CryptoRng>
 {
     tcp_handle: SocketHandle,
     rng: R,
-    session: RefCell<Session>,
+    session: RefCell<Session<'s>>,
 }
 
-impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
+impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
     pub fn new<'a, 'b, 'c>(
         sockets: &mut SocketSet<'a, 'b, 'c>,
         rx_buffer: TcpSocketBuffer<'b>,
         tx_buffer: TcpSocketBuffer<'b>,
         rng: R,
+        certificate_with_key: Option<(
+            crate::session::CertificatePrivateKey,
+            Vec<&'s [u8]>
+        )>
     ) -> Self
     where
         'b: 'c,
@@ -75,7 +80,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             tcp_handle,
             rng,
             session: RefCell::new(
-                Session::new(TlsRole::Client)
+                Session::new(TlsRole::Client, certificate_with_key)
             ),
         }
     }
@@ -162,9 +167,13 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             // TLS client should jump from WAIT_SH directly to WAIT_CERT_CR directly.
             TlsState::WAIT_EE => {},
 
-            // TLS Client wait for server's certificate
+            // TLS Client wait for server's certificate/ certificate request
             // No need to send anything
             TlsState::WAIT_CERT_CR => {},
+
+            // TLS Client wait for server's certificate after receiveing a request
+            // No need to send anything
+            TlsState::WAIT_CERT => {},
 
             // TLS Client wait for server's certificate cerify
             // No need to send anything
@@ -176,7 +185,148 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             TlsState::WAIT_FINISHED => {}
 
             // Send client Finished to end handshake
+            // Also send certificate and certificate verify before client Finished if
+            // server sent a CertificateRequest beforehand
             TlsState::SERVER_CONNECTED => {
+                // Certificate & CertificateVerify
+                let need_to_send_client_cert = {
+                    self.session.borrow().need_to_send_client_certificate()
+                };
+                if need_to_send_client_cert {
+                    let (certificates_total_length, mut buffer_vec) = {
+                        let mut session = self.session.borrow_mut();
+                        let mut buffer_vec: Vec<u8> = Vec::new();
+                        let certificates = session
+                            .get_private_certificate_slices()
+                            .clone();
+    
+                        // Handshake level, client certificate byte followed by length (u24)
+                        let mut handshake_header: [u8; 4] = [11, 0, 0, 0];
+                        // Certificate struct:
+                        // request_context = X509: 0 (u8),
+                        // certificate_list to be determined (u24)
+                        let mut certificate_header: [u8; 4] = [0, 0, 0, 0];
+                        let mut certificates_total_length: u32 = 0;
+    
+                        // Append place holder bytes (8 of them) in the buffer vector
+                        // Simpily copy the the headers back into the vector
+                        // when all certificates are appended into the vector
+                        buffer_vec.extend_from_slice(&[11, 0, 0, 0, 0, 0, 0, 0]);
+    
+                        // Certificate Entry struct(s)
+                        if let Some(certificate_list) = certificates {
+                            for cert in certificate_list.iter() {
+                                // cert_data length, to be determined (u24)
+                                let mut cert_data_length: [u8; 3] = [0, 0, 0];
+                                // extensions: no extension needed
+                                let extension: [u8; 2] = [0, 0];
+    
+                                let certificate_length: u32 = u32::try_from(cert.len()).unwrap();
+    
+                                NetworkEndian::write_u24(
+                                    &mut cert_data_length,
+                                    certificate_length
+                                );
+    
+                                // Update length in Certificate struct
+                                certificates_total_length += (
+                                    // cert_data (len & data) AND extension (len & data)
+                                    3 + certificate_length + 2 + 0
+                                );
+    
+                                buffer_vec.extend_from_slice(&cert_data_length);
+                                buffer_vec.extend_from_slice(cert);
+                                buffer_vec.extend_from_slice(&extension);
+                            }
+                        }
+    
+                        // Write total certificate length into Certificate struct
+                        NetworkEndian::write_u24(
+                            &mut buffer_vec[5..8],
+                            certificates_total_length
+                        );
+    
+                        // Write the length of the entire handshake
+                        NetworkEndian::write_u24(
+                            &mut buffer_vec[1..4],
+                            // 4 bytes for the Certificate struct header
+                            certificates_total_length + 4
+                        );
+    
+                        // Inner plaintext: record type 
+                        buffer_vec.push(22);
+                        (certificates_total_length, buffer_vec)
+                    };
+
+                    self.send_application_slice(sockets, &mut buffer_vec.clone())?;
+                    // Update session
+                    let buffer_vec_length = buffer_vec.len();
+
+                    {
+                        self.session.borrow_mut()
+                            .client_update_for_certificate_in_server_connected(
+                            &buffer_vec[..(buffer_vec_length-1)]
+                        );
+                    }
+
+                    // Send a CertificateVerify as well if any certificates
+                    // were just sent by the client
+                    if certificates_total_length != 0 {
+                        // Serialize CertificateVerify
+
+                        // Handshake bytes:
+                        // msg_type = 15, CertificateVerify (u8)
+                        // handshake_data_length = to be determined (u24)
+                        // signature algorithm (u16)
+                        // signature_length (u16)
+                        // signature, the rest
+
+                        let mut verify_buffer_vec: Vec<u8> = Vec::new();
+                        // Leave bytes from Handshake struct as placeholders
+                        verify_buffer_vec.extend_from_slice(&[
+                            15,
+                            0, 0, 0,
+                            0, 0,
+                            0, 0
+                        ]);
+                        {
+                            let session = self.session.borrow();
+                            let (sig_alg, signature) = session
+                                .get_client_certificate_verify_signature();
+                            
+                            let signature_length: u16 = u16::try_from(signature.len()).unwrap();
+                            NetworkEndian::write_u24(
+                                &mut verify_buffer_vec[1..4],
+                                (signature_length + 4).into()
+                            );
+                            NetworkEndian::write_u16(
+                                &mut verify_buffer_vec[4..6],
+                                sig_alg.try_into().unwrap()
+                            );
+                            NetworkEndian::write_u16(
+                                &mut verify_buffer_vec[6..8],
+                                signature_length
+                            );
+                            verify_buffer_vec.extend_from_slice(&signature);
+                        }
+                        // Push content byte (handshake: 22)
+                        verify_buffer_vec.push(22);
+
+                        log::info!("Client CV: {:?}", verify_buffer_vec);
+                        self.send_application_slice(sockets, &mut verify_buffer_vec.clone())?;
+                        // Update session
+                        let cert_verify_len = verify_buffer_vec.len();
+
+                        {
+                            self.session.borrow_mut()
+                                .client_update_for_cert_verify_in_server_connected(
+                                    &verify_buffer_vec[..(cert_verify_len-1)]
+                                );
+                        }
+                    }
+                }
+
+                // Client Finished
                 let inner_plaintext: HeaplessVec<u8, U64> = {
                     let verify_data = self.session.borrow()
                         .get_client_finished_verify_data();
@@ -192,8 +342,10 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
                     buffer
                 };
                 self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
+
+                let inner_plaintext_length = inner_plaintext.len();
                 self.session.borrow_mut()
-                    .client_update_for_server_connected(&inner_plaintext);
+                    .client_update_for_server_connected(&inner_plaintext[..(inner_plaintext_length-1)]);
             }
 
             _ => todo!()
@@ -449,38 +601,131 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             // In this stage, wait for a certificate from server
             // Parse the certificate and check its content
             TlsState::WAIT_CERT_CR => {
-                // Verify that it is indeed an Certificate
+                // Verify that it is indeed an Certificate, or CertificateRequest
                 let might_be_cert = repr.handshake.take().unwrap();
-                if might_be_cert.get_msg_type() != HandshakeType::Certificate {
-                    // Process the other handshakes in "handshake_vec"
+                if might_be_cert.get_msg_type() == HandshakeType::Certificate {
+                    // Process certificates
+
+                    // let all_certificates = might_be_cert.get_all_asn1_der_certificates().unwrap();
+                    // log::info!("Number of certificates: {:?}", all_certificates.len());
+                    // log::info!("All certificates: {:?}", all_certificates);
+
+                    // TODO: Process all certificates
+                    let cert = might_be_cert.get_asn1_der_certificate().unwrap();
+
+                    // TODO: Replace this block after implementing a proper 
+                    // certificate verification procdeure
+                    cert.validate_self_signed_signature().expect("Signature mismatched");
+
+                    // Update session TLS state to WAIT_CV
+                    // Length of handshake header is 4
+                    let (_handshake_slice, cert_slice) = 
+                        take::<_, _, (&[u8], ErrorKind)>(
+                            might_be_cert.length + 4
+                        )(handshake_slice)
+                            .map_err(|_| Error::Unrecognized)?;
+
+                    self.session.borrow_mut()
+                        .client_update_for_wait_cert_cr(
+                            &cert_slice,
+                            cert.get_cert_public_key().unwrap()
+                        );
+                    log::info!("Received WAIT_CERT_CR");
+                }
+                else if might_be_cert.get_msg_type() == HandshakeType::CertificateRequest {
+                    // Process signature algorithm extension
+                    // Signature algorithm for the private key of client cert must be included
+                    // within the list of signature algorithms
+                    //
+                    // Client is STRONGLY RECOMMENDED to use a signature algorithm within
+                    // the list of `mandatory to implement` signature algorithms, including:
+                    // rsa_pkcs1_sha256, rsa_pss_rsae_sha256, ecdsa_secp256r1_sha256
+                    //
+                    // Update client state
+                    let cert_req_extensions: &Vec<Extension> = might_be_cert
+                        .get_cert_request_extensions()
+                        .unwrap();
+                    let sig_algs_ext: Option<&crate::tls_packet::Extension>
+                        = cert_req_extensions
+                            .iter()
+                            .find( |&extension| {
+                                extension.extension_type
+                                    == crate::tls_packet::ExtensionType::SignatureAlgorithms
+                                }
+                            );
+                    if sig_algs_ext.is_some() {
+                        // Convert extension into SignatureScheme
+                        if let crate::tls_packet::ExtensionData::SignatureAlgorithms(
+                            scheme_list
+                        ) = &sig_algs_ext.unwrap().extension_data {
+                            // Update session TLS state to WAIT_CERT
+                            // Length of handshake header is 4
+                            let (_handshake_slice, cert_req_slice) = 
+                                take::<_, _, (&[u8], ErrorKind)>(
+                                    might_be_cert.length + 4
+                                )(handshake_slice)
+                                    .map_err(|_| Error::Unrecognized)?;
+                            
+                            self.session.borrow_mut()
+                                .client_update_for_certificate_request(
+                                    &cert_req_slice,
+                                    &scheme_list.supported_signature_algorithms
+                                );
+                        }
+
+
+                    } else {
+                        // Reject connection, CertificateRequest must have
+                        // SignatureAlgorithm extension
+                        todo!()
+                    }
+                    log::info!("Received WAIT_CERT_CR");
+                }
+                else {
+                    // Throw alert
                     todo!()
                 }
+            },
 
-                // let all_certificates = might_be_cert.get_all_asn1_der_certificates().unwrap();
-                // log::info!("Number of certificates: {:?}", all_certificates.len());
-                // log::info!("All certificates: {:?}", all_certificates);
+            // In this stage, server will send a certificate chain
+            // Verify the certificate
+            TlsState::WAIT_CERT => {
+                // Verify that it is indeed an Certificate
+                let might_be_cert = repr.handshake.take().unwrap();
 
-                // TODO: Process all certificates
-                let cert = might_be_cert.get_asn1_der_certificate().unwrap();
+                if might_be_cert.get_msg_type() == HandshakeType::Certificate {
+                    // Process certificates
 
-                // TODO: Replace this block after implementing a proper 
-                // certificate verification procdeure
-                cert.validate_self_signed_signature().expect("Signature mismatched");
+                    // let all_certificates = might_be_cert.get_all_asn1_der_certificates().unwrap();
+                    // log::info!("Number of certificates: {:?}", all_certificates.len());
+                    // log::info!("All certificates: {:?}", all_certificates);
 
-                // Update session TLS state to WAIT_CV
-                // Length of handshake header is 4
-                let (_handshake_slice, cert_slice) = 
-                    take::<_, _, (&[u8], ErrorKind)>(
-                        might_be_cert.length + 4
-                    )(handshake_slice)
-                        .map_err(|_| Error::Unrecognized)?;
+                    // TODO: Process all certificates
+                    let cert = might_be_cert.get_asn1_der_certificate().unwrap();
 
-                self.session.borrow_mut()
-                    .client_update_for_wait_cert_cr(
-                        &cert_slice,
-                        cert.get_cert_public_key().unwrap()
-                    );
-                log::info!("Received WAIT_CERT_CR");
+                    // TODO: Replace this block after implementing a proper 
+                    // certificate verification procdeure
+                    cert.validate_self_signed_signature().expect("Signature mismatched");
+
+                    // Update session TLS state to WAIT_CV
+                    // Length of handshake header is 4
+                    let (_handshake_slice, cert_slice) = 
+                        take::<_, _, (&[u8], ErrorKind)>(
+                            might_be_cert.length + 4
+                        )(handshake_slice)
+                            .map_err(|_| Error::Unrecognized)?;
+
+                    self.session.borrow_mut()
+                        .client_update_for_wait_cert_cr(
+                            &cert_slice,
+                            cert.get_cert_public_key().unwrap()
+                        );
+                    log::info!("Received WAIT_CERT");
+                } else {
+                    // Unexpected handshakes
+                    // Throw alert
+                    todo!()
+                }
             },
 
             // In this stage, server will eventually send a CertificateVerify
@@ -619,6 +864,7 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             },
             _ => return Err(Error::Illegal),
         };
+
         NetworkEndian::write_u16(
             &mut associated_data[3..5],
             auth_tag_length + u16::try_from(slice.len()).unwrap()
@@ -671,7 +917,34 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
             return Ok(0);
         }
 
-        let recv_slice_size = tcp_socket.recv_slice(data)?;
+        // TODO: Use `recv` to receive instead
+        // Issue with using recv slice:
+        // Encrypted application data can cramp together into a TCP Segment
+        // Dequeuing all bytes from the buffer immediately can cause
+        // 1. Incorrect decryption, hence throwing error, and
+        // 2. sequence number to go out of sync forever
+        let (recv_slice_size, acceptable) = tcp_socket.recv(
+            |buffer| {
+                // Read the size of the TLS record beforehand
+                let record_length: usize = NetworkEndian::read_u16(&buffer[3..5]).into();
+                let provided_data_capacity: usize = data.len();
+                // Copy the entire byte representation of TLS packet into the
+                // user-provided buffer, if possible
+                if provided_data_capacity >= (record_length + 5) {
+                    &data[..(record_length + 5)].clone_from_slice(&buffer[..(record_length + 5)]);
+                }
+                (
+                    (record_length + 5),
+                    (
+                        (record_length + 5),
+                        provided_data_capacity < (record_length + 5)
+                    )
+                )
+            }
+        )?;
+
+        // let recv_slice_size = tcp_socket.recv_slice(data)?;
+
         // Encrypted data need a TLS record wrapper (5 bytes)
         // Authentication tag (16 bytes, for all supported AEADs)
         // Content type byte (1 byte)
@@ -684,11 +957,12 @@ impl<R: 'static + RngCore + CryptoRng> TlsSocket<R> {
         let mut session = self.session.borrow_mut();
         let mut associated_data: [u8; 5] = [0; 5];
         associated_data.clone_from_slice(&data[..5]);
-        log::info!("Received encrypted appdata: {:?}", &data[..recv_slice_size]);
+        // log::info!("Received encrypted appdata: {:?}", &data[..recv_slice_size]);
 
         // Dump association data (TLS Record wrapper)
         // Only decrypt application data
         // Always increment sequence number after decrpytion
+        log::info!("Sequence number: {:?}", session.server_sequence_number);
         session.decrypt_application_data_in_place(
             &associated_data,
             &mut data[5..recv_slice_size]

@@ -1,4 +1,4 @@
-use p256::{ EncodedPoint, ecdh::EphemeralSecret };
+use p256::{ EncodedPoint, ecdh::EphemeralSecret, ecdsa::signature::DigestVerifier };
 use heapless::{ Vec, consts::* };
 use sha2::{ Digest, Sha256, Sha384, Sha512, digest::FixedOutput };
 use aes_gcm::{ Aes128Gcm, Aes256Gcm, aes::Aes128 };
@@ -18,9 +18,11 @@ use crate::tls_packet::SignatureScheme;
 use crate::Error;
 use crate::fake_rng::FakeRandom;
 
+use core::convert::TryFrom;
+
 type Aes128Ccm = Ccm<Aes128, U16, U12>;
 
-pub(crate) struct Session {
+pub(crate) struct Session<'a> {
     state: TlsState,
     role: TlsRole,
     // Session ID for this session
@@ -59,14 +61,22 @@ pub(crate) struct Session {
     // Reset to 0 on rekey AND key exchange
     // TODO: Force rekey if sequence number need to wrap (very low priority)
     client_sequence_number: u64,
-    server_sequence_number: u64,
+    pub server_sequence_number: u64,
     // Certificate public key
     // For Handling CertificateVerify
     cert_public_key: Option<CertificatePublicKey>,
+    // Client certificate and its private key
+    cert_private_key: Option<(CertificatePrivateKey, alloc::vec::Vec<&'a [u8]>)>,
+    // Flag for noting the need to send client certificate
+    // Client must cent Certificate extension iff server requested it
+    need_send_client_cert: bool,
+    client_cert_verify_sig_alg: Option<crate::tls_packet::SignatureScheme>,
 }
 
-impl Session {
-    pub(crate) fn new(role: TlsRole) -> Self {
+impl<'a> Session<'a> {
+    pub(crate) fn new(role: TlsRole, certificate_with_key: Option<(
+        CertificatePrivateKey, alloc::vec::Vec<&'a [u8]>
+    )>) -> Self {
         let hash = Hash::Undetermined {
             sha256: Sha256::new(),
             sha384: Sha384::new(),
@@ -93,7 +103,10 @@ impl Session {
             server_application_nonce: None,
             client_sequence_number: 0,
             server_sequence_number: 0,
-            cert_public_key: None
+            cert_public_key: None,
+            cert_private_key: certificate_with_key,
+            need_send_client_cert: false,
+            client_cert_verify_sig_alg: None
         }
     }
 
@@ -129,15 +142,7 @@ impl Session {
         if self.state != TlsState::WAIT_SH || self.role != TlsRole::Client {
             todo!()
         }
-        // Generate ECDHE shared secret
-        // Remove private secret
-        // let ecdhe_shared_secret =
-        //     self.ecdhe_secret
-        //         .take()
-        //         .unwrap()
-        //         .diffie_hellman(&encoded_point)
-        //         .unwrap();
-        
+       
         let mut shared_secret_bytes: [u8; 32] = [0; 32];
         if encoded_point.is_some() {
             let p256_shared_secret =
@@ -496,6 +501,72 @@ impl Session {
         self.state = TlsState::WAIT_CERT_CR;
     }
 
+    pub(crate) fn client_update_for_certificate_request(
+        &mut self,
+        cert_request_slice: &[u8],
+        signature_algorithms: &[crate::tls_packet::SignatureScheme]
+    ) {
+        self.hash.update(cert_request_slice);
+        // Note the need of sending client certificate
+        self.need_send_client_cert = true;
+        // Determine the supplied client certificate indeed has an
+        // acceptable signature algorithm
+        let mut private_key_algorithm_acceptable = false;
+        if let Some((private_key, cert)) = &self.cert_private_key {
+            if let CertificatePrivateKey::RSA {..} = private_key {
+                for sig_alg in signature_algorithms.iter() {
+                    use crate::tls_packet::SignatureScheme::*;
+                    if *sig_alg == rsa_pkcs1_sha256
+                        || *sig_alg == rsa_pkcs1_sha384
+                        || *sig_alg == rsa_pkcs1_sha512
+                        || *sig_alg == rsa_pss_rsae_sha256
+                        || *sig_alg == rsa_pss_rsae_sha384
+                        || *sig_alg == rsa_pss_rsae_sha512
+                        || *sig_alg == rsa_pss_pss_sha256
+                        || *sig_alg == rsa_pss_pss_sha384
+                        || *sig_alg == rsa_pss_pss_sha512
+                    {
+                        private_key_algorithm_acceptable = true;
+                        self.client_cert_verify_sig_alg.replace(*sig_alg);
+                        break;
+                    }
+                }
+            } else if let CertificatePrivateKey::ECDSA_SECP256R1_SHA256 {..}
+                = private_key
+            {
+                for sig_alg in signature_algorithms.iter() {
+                    use crate::tls_packet::SignatureScheme::*;
+                    if *sig_alg == ecdsa_secp256r1_sha256
+                    {
+                        private_key_algorithm_acceptable = true;
+                        self.client_cert_verify_sig_alg.replace(*sig_alg);
+                        break;
+                    }
+                }
+            } else if let CertificatePrivateKey::ED25519 {..} = private_key {
+                for sig_alg in signature_algorithms.iter() {
+                    use crate::tls_packet::SignatureScheme::*;
+                    if *sig_alg == ed25519
+                    {
+                        private_key_algorithm_acceptable = true;
+                        self.client_cert_verify_sig_alg.replace(*sig_alg);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Dump the private key and certificate if the other side will not take it
+        if !private_key_algorithm_acceptable {
+            self.cert_private_key.take();
+        }
+
+        log::info!("client key: {:?}", self.cert_private_key.is_some());
+
+        // Move to the next state
+        self.state = TlsState::WAIT_CERT;
+    }
+
     pub(crate) fn client_update_for_wait_cert_cr(
         &mut self,
         cert_slice: &[u8],
@@ -525,11 +596,39 @@ impl Session {
         // Handle Ed25519 and p256 separately
         // These 2 algorithms have a mandated hash function
         if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256 {
-            todo!()
+            let verify_hash = Sha256::new()
+                .chain(&[0x20; 64])
+                .chain("TLS 1.3, server CertificateVerify")
+                .chain(&[0])
+                .chain(&transcript_hash);
+            let ecdsa_signature = p256::ecdsa::Signature::from_asn1(signature).unwrap();
+            self.cert_public_key
+                .take()
+                .unwrap()
+                .get_ecdsa_secp256r1_sha256_verify_key()
+                .unwrap()
+                .verify_digest(
+                    verify_hash, &ecdsa_signature
+                ).unwrap();
+            return
         }
 
         if signature_algorithm == SignatureScheme::ed25519 {
-            todo!()
+            let verify_hash = Sha512::new()
+                .chain(&[0x20; 64])
+                .chain("TLS 1.3, server CertificateVerify")
+                .chain(&[0])
+                .chain(&transcript_hash);
+            let ed25519_signature = ed25519_dalek::Signature::try_from(
+                signature
+            ).unwrap();
+            self.cert_public_key.take()
+                .unwrap()
+                .get_ed25519_public_key()
+                .unwrap()
+                .verify_prehashed(verify_hash, None, &ed25519_signature)
+                .unwrap();
+            return
         }
 
         // Get verification hash, and verify the signature
@@ -695,6 +794,8 @@ impl Session {
                 "s ap traffic",
                 self.hash.get_sha256_clone().unwrap()
             );
+
+            log::info!("Server traffic secret: {:?}", server_application_traffic_secret);
 
             self.client_application_traffic_secret.replace(
                 Vec::from_slice(&client_application_traffic_secret).unwrap()
@@ -983,6 +1084,26 @@ impl Session {
         self.state = TlsState::SERVER_CONNECTED;
     }
 
+    pub(crate) fn client_update_for_certificate_in_server_connected(
+        &mut self,
+        client_certificate_slice: &[u8]
+    )
+    {
+        // Sequence number is updated by send methods
+        // No need to change state as client will send everything needed immediately
+        self.hash.update(client_certificate_slice);
+    }
+
+    pub(crate) fn client_update_for_cert_verify_in_server_connected(
+        &mut self,
+        client_certificate_verify_slice: &[u8]
+    )
+    {
+        // Sequence number is updated by send methods
+        // No need to change state as client will send everything needed immediately
+        self.hash.update(client_certificate_verify_slice);
+    }
+
 
     pub(crate) fn client_update_for_server_connected(
         &mut self,
@@ -1015,6 +1136,190 @@ impl Session {
 
     pub(crate) fn receive_change_cipher_spec(&mut self) {
         self.changed_cipher_spec = true;
+    }
+
+    pub(crate) fn need_to_send_client_certificate(&self) -> bool {
+        self.need_send_client_cert
+    }
+
+    pub(crate) fn get_private_certificate_slices(&self) -> Option<&alloc::vec::Vec<&[u8]>> {
+        if let Some((_, cert_vec)) = &self.cert_private_key {
+            Some(cert_vec)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn get_client_certificate_verify_signature(&self)
+        -> (crate::tls_packet::SignatureScheme, alloc::vec::Vec<u8>) 
+    {
+        if let Some((private_key, client_certificate)) = &self.cert_private_key {
+            let transcript_hash: Vec<u8, U64> =
+                if let Ok(sha256) = self.hash.get_sha256_clone() {
+                    Vec::from_slice(&sha256.finalize()).unwrap()
+                } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+                    Vec::from_slice(&sha384.finalize()).unwrap()
+                } else {
+                    unreachable!()
+                };
+            
+            use crate::tls_packet::SignatureScheme::*;
+            // RSA signature must be with PSS padding scheme
+            let get_rsa_padding_scheme = |sig_alg: SignatureScheme|
+                -> (SignatureScheme, PaddingScheme)
+            {
+                match sig_alg {
+                    rsa_pkcs1_sha256 => {
+                        (
+                            rsa_pss_rsae_sha256,
+                            PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_256))
+                        )
+                    },
+                    rsa_pkcs1_sha384 => {
+                        (
+                            rsa_pss_rsae_sha384,
+                            PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_384))
+                        )
+                    },
+                    rsa_pkcs1_sha512 => {
+                        (
+                            rsa_pss_rsae_sha512,
+                            PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_512))
+                        )
+                    },
+                    rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                        (
+                            sig_alg,
+                            PaddingScheme::new_pss::<Sha256, FakeRandom>(FakeRandom{})
+                        )
+                    },
+                    rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                        (
+                            sig_alg,
+                            PaddingScheme::new_pss::<Sha384, FakeRandom>(FakeRandom{})
+                        )
+                    },
+                    rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                        (
+                            sig_alg,
+                            PaddingScheme::new_pss::<Sha512, FakeRandom>(FakeRandom{})
+                        )
+                    },
+                    _ => unreachable!()
+                }
+            };
+
+            match private_key {
+                CertificatePrivateKey::RSA { cert_rsa_private_key } => {
+                    let sig_alg = self.client_cert_verify_sig_alg.unwrap();
+                    let verify_hash: Vec<u8, U64> = match sig_alg {
+                        rsa_pkcs1_sha256 | rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                            Vec::from_slice(
+                                &sha2::Sha256::new()
+                                    .chain(&[0x20; 64])
+                                    .chain("TLS 1.3, client CertificateVerify")
+                                    .chain(&[0x00])
+                                    .chain(&transcript_hash)
+                                    .finalize()
+                            ).unwrap()
+                        },
+                        rsa_pkcs1_sha384 | rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                            Vec::from_slice(
+                                &sha2::Sha384::new()
+                                    .chain(&[0x20; 64])
+                                    .chain("TLS 1.3, client CertificateVerify")
+                                    .chain(&[0x00])
+                                    .chain(&transcript_hash)
+                                    .finalize()
+                            ).unwrap()
+                        },
+                        rsa_pkcs1_sha512 | rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                            Vec::from_slice(
+                                &sha2::Sha512::new()
+                                    .chain(&[0x20; 64])
+                                    .chain("TLS 1.3, client CertificateVerify")
+                                    .chain(&[0x00])
+                                    .chain(&transcript_hash)
+                                    .finalize()
+                            ).unwrap()
+                        },
+                        _ => unreachable!()
+                    };
+                    let (modified_sig_alg, padding) = get_rsa_padding_scheme(sig_alg);
+                    (
+                        modified_sig_alg,
+                        cert_rsa_private_key.sign(
+                            padding, &verify_hash
+                        ).unwrap()
+                    )
+                },
+
+                CertificatePrivateKey::ECDSA_SECP256R1_SHA256 { cert_signing_key } => {
+                    let verify_hash = sha2::Sha256::new()
+                        .chain(&[0x20; 64])
+                        .chain("TLS 1.3, client CertificateVerify")
+                        .chain(&[0x00])
+                        .chain(&transcript_hash);
+                    
+                    use p256::ecdsa::signature::DigestSigner;
+                    let sig_vec = alloc::vec::Vec::from(
+                        cert_signing_key.sign_digest(verify_hash).as_ref()
+                    );
+
+                    (
+                        ecdsa_secp256r1_sha256,
+                        sig_vec
+                    )
+                },
+
+                CertificatePrivateKey::ED25519 { cert_eddsa_key } => {
+                    let verify_hash = sha2::Sha512::new()
+                        .chain(&[0x20; 64])
+                        .chain("TLS 1.3, client CertificateVerify")
+                        .chain(&[0x00])
+                        .chain(&transcript_hash);
+                    
+                    // Ed25519 requires a key-pair to sign
+                    // Get public key from certificate
+                    let certificate = crate::parse::parse_asn1_der_certificate(
+                        client_certificate[0]
+                    ).unwrap().1;
+
+                    let cert_public_key = certificate
+                        .get_cert_public_key()
+                        .unwrap();
+                    let ed25519_public_key = cert_public_key
+                        .get_ed25519_public_key()
+                        .unwrap();
+
+                    let mut keypair_bytes: [u8; 64] = [0; 64];
+                    &keypair_bytes[..32].clone_from_slice(cert_eddsa_key.as_bytes());
+                    &keypair_bytes[32..].clone_from_slice(ed25519_public_key.as_bytes());
+
+                    let ed25519_keypair = ed25519_dalek::Keypair::from_bytes(
+                        &keypair_bytes
+                    ).unwrap();
+
+                    let sig_vec = alloc::vec::Vec::from(
+                        ed25519_keypair
+                            .sign_prehashed(verify_hash, None)
+                            .unwrap()
+                            .as_ref()
+                    );
+
+                    (
+                        ed25519,
+                        sig_vec
+                    )
+                }
+            }
+        }
+        else {
+            // Should definitely NOT be invoking this function
+            // TODO: Throw error
+            todo!()
+        }
+
     }
 
     pub(crate) fn get_client_finished_verify_data(&self) -> Vec<u8, U64> {
@@ -1235,6 +1540,7 @@ impl Session {
         associated_data: &[u8],
         buffer: &mut [u8]
     ) -> Result<(), Error> {
+
         let (seq_num, nonce, cipher): (u64, &Vec<u8, U12>, &Cipher) = match self.role {
             TlsRole::Server => {(
                 self.client_sequence_number,
@@ -1517,5 +1823,17 @@ impl CertificatePublicKey {
         } else {
             Err(())
         }
+    }
+}
+
+pub enum CertificatePrivateKey {
+    RSA {
+        cert_rsa_private_key: rsa::RSAPrivateKey
+    },
+    ECDSA_SECP256R1_SHA256 {
+        cert_signing_key: p256::ecdsa::SigningKey
+    },
+    ED25519 {
+        cert_eddsa_key: ed25519_dalek::SecretKey
     }
 }

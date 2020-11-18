@@ -68,6 +68,7 @@ fn main() {
             rx_buffer,
             tx_buffer,
             &mut RNG,
+            None
         )
     };
 
