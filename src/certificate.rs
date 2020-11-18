@@ -553,7 +553,6 @@ impl<'a> Certificate<'a> {
     pub fn get_cert_public_key(&self) -> Result<CertificatePublicKey, ()> {
         let public_key_info = &self.tbs_certificate.subject_public_key_info;
         let algorithm_identifier = &public_key_info.algorithm;
-        log::info!("sig alg ident: {:?}", algorithm_identifier);
 
         // 3 possibilities: RSA_ENCRYPTION, ID_EC_PUBLIC_KEY, and EdDSA25519
         match algorithm_identifier.algorithm {
@@ -561,8 +560,6 @@ impl<'a> Certificate<'a> {
                 let (_, (modulus, exponent)) = parse_asn1_der_rsa_public_key(
                     self.tbs_certificate.subject_public_key_info.subject_public_key
                 ).map_err(|_| ())?;
-
-                log::info!("Mod: {:?}, exp: {:?}", modulus, exponent);
         
                 let public_key = RSAPublicKey::new(
                     BigUint::from_bytes_be(modulus),
@@ -616,7 +613,6 @@ impl<'a> Certificate<'a> {
     pub fn validate_self_signed_signature(&self) -> Result<(), TlsError> {
         let cert_public_key = self.get_cert_public_key()
             .map_err(|_| TlsError::SignatureValidationError)?;
-        log::info!("Own public key: {:?}", cert_public_key);
         self.validate_signature_with_trusted(&cert_public_key)
     }
 
@@ -630,7 +626,6 @@ impl<'a> Certificate<'a> {
         let sig_alg = self.signature_algorithm.algorithm;
 
         // Prepare hash value
-        log::info!("sig alg: {:?}", sig_alg);
         match sig_alg {
             SHA1_WITH_RSA_ENCRYPTION => {
                 let padding = PaddingScheme::new_pkcs1v15_sign(Some(Hash::SHA1));
@@ -686,7 +681,6 @@ impl<'a> Certificate<'a> {
                 let (_, (hash_alg, salt_len)) = parse_rsa_ssa_pss_parameters(
                     self.signature_algorithm.parameters
                 ).unwrap();
-                log::info!("Hash alg, salt_len: {:X?}, {:X?}", hash_alg, salt_len);
                 match hash_alg {
                     ID_SHA1 => {
                         let padding = PaddingScheme::new_pss_with_salt::<Sha1, FakeRandom>(
@@ -715,15 +709,12 @@ impl<'a> Certificate<'a> {
                     },
 
                     ID_SHA256 => {
-                        log::info!("Selected SHA256 with salt length: {:?}", salt_len);
                         let padding = PaddingScheme::new_pss_with_salt::<Sha256, FakeRandom>(
                             FakeRandom {},
                             salt_len
                         );
                         let hashed = Sha256::digest(self.tbs_certificate_encoded);
                         let sig = self.signature_value;
-                        log::info!("signature: {:X?}", sig);
-                        log::info!("Trusted key: {:?}", trusted_public_key);
                         trusted_public_key.get_rsa_public_key()
                             .map_err(|_| TlsError::SignatureValidationError)?
                             .verify(padding, &hashed, sig)
@@ -778,7 +769,6 @@ impl<'a> Certificate<'a> {
                 let sig = ed25519_dalek::Signature::try_from(
                     self.signature_value
                 ).map_err(|_| TlsError::SignatureValidationError)?;
-                log::info!("Ed25519 signature: {:?}", sig);
                 trusted_public_key.get_ed25519_public_key()
                     .map_err(|_| TlsError::SignatureValidationError)?
                     .verify_strict(self.tbs_certificate_encoded, &sig)
