@@ -16,7 +16,7 @@ use crate::tls_packet::CipherSuite;
 use crate::key::*;
 use crate::tls_packet::SignatureScheme;
 use crate::Error;
-use crate::fake_rng::FakeRandom;
+use crate::fake_rng::{FakeRandom, OneTimeRandom};
 
 use core::convert::TryFrom;
 
@@ -795,8 +795,6 @@ impl<'a> Session<'a> {
                 self.hash.get_sha256_clone().unwrap()
             );
 
-            log::info!("Server traffic secret: {:?}", server_application_traffic_secret);
-
             self.client_application_traffic_secret.replace(
                 Vec::from_slice(&client_application_traffic_secret).unwrap()
             );
@@ -1150,7 +1148,7 @@ impl<'a> Session<'a> {
         }
     }
 
-    pub(crate) fn get_client_certificate_verify_signature(&self)
+    pub(crate) fn get_client_certificate_verify_signature<R: rand_core::RngCore>(&self, rng: &mut R)
         -> (crate::tls_packet::SignatureScheme, alloc::vec::Vec<u8>) 
     {
         if let Some((private_key, client_certificate)) = &self.cert_private_key {
@@ -1162,47 +1160,61 @@ impl<'a> Session<'a> {
                 } else {
                     unreachable!()
                 };
+            log::info!("Client Transcript Hash: {:?}", transcript_hash);
             
             use crate::tls_packet::SignatureScheme::*;
             // RSA signature must be with PSS padding scheme
-            let get_rsa_padding_scheme = |sig_alg: SignatureScheme|
+            let mut get_rsa_padding_scheme = |sig_alg: SignatureScheme|
                 -> (SignatureScheme, PaddingScheme)
             {
                 match sig_alg {
                     rsa_pkcs1_sha256 => {
+                        let mut salt_buffer: [u8; 32] = [0; 32];
+                        rng.fill_bytes(&mut salt_buffer);
+                        let one_time_rng = OneTimeRandom::new(&salt_buffer);
                         (
                             rsa_pss_rsae_sha256,
-                            PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_256))
+                            PaddingScheme::new_pss_with_salt::<Sha256, OneTimeRandom<U32>>(one_time_rng, 32)
                         )
                     },
                     rsa_pkcs1_sha384 => {
+                        let salt_buffer: [u8; 48] = [0; 48];
+                        let one_time_rng = OneTimeRandom::new(&salt_buffer);
                         (
                             rsa_pss_rsae_sha384,
-                            PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_384))
+                            PaddingScheme::new_pss_with_salt::<Sha256, OneTimeRandom<U48>>(one_time_rng, 48)
                         )
                     },
                     rsa_pkcs1_sha512 => {
+                        let salt_buffer: [u8; 64] = [0; 64];
+                        let one_time_rng = OneTimeRandom::new(&salt_buffer);
                         (
                             rsa_pss_rsae_sha512,
-                            PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_512))
+                            PaddingScheme::new_pss_with_salt::<Sha256, OneTimeRandom<U64>>(one_time_rng, 64)
                         )
                     },
                     rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                        let salt_buffer: [u8; 32] = [0; 32];
+                        let one_time_rng = OneTimeRandom::new(&salt_buffer);
                         (
                             sig_alg,
-                            PaddingScheme::new_pss::<Sha256, FakeRandom>(FakeRandom{})
+                            PaddingScheme::new_pss_with_salt::<Sha256, OneTimeRandom<U32>>(one_time_rng, 32)
                         )
                     },
                     rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                        let salt_buffer: [u8; 48] = [0; 48];
+                        let one_time_rng = OneTimeRandom::new(&salt_buffer);
                         (
                             sig_alg,
-                            PaddingScheme::new_pss::<Sha384, FakeRandom>(FakeRandom{})
+                            PaddingScheme::new_pss_with_salt::<Sha256, OneTimeRandom<U48>>(one_time_rng, 48)
                         )
                     },
                     rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                        let salt_buffer: [u8; 64] = [0; 64];
+                        let one_time_rng = OneTimeRandom::new(&salt_buffer);
                         (
                             sig_alg,
-                            PaddingScheme::new_pss::<Sha512, FakeRandom>(FakeRandom{})
+                            PaddingScheme::new_pss_with_salt::<Sha256, OneTimeRandom<U64>>(one_time_rng, 64)
                         )
                     },
                     _ => unreachable!()

@@ -90,4 +90,4 @@ optional = true
 
 [features]
 default = []
-std = [ "rand", "hex-literal", "simple_logger" ]
+std = [ "rand", "hex-literal", "simple_logger", "rsa/default" ]

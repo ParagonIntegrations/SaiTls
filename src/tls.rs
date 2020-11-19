@@ -292,7 +292,7 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                         {
                             let session = self.session.borrow();
                             let (sig_alg, signature) = session
-                                .get_client_certificate_verify_signature();
+                                .get_client_certificate_verify_signature(&mut self.rng);
                             
                             let signature_length: u16 = u16::try_from(signature.len()).unwrap();
                             NetworkEndian::write_u24(
@@ -312,7 +312,6 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                         // Push content byte (handshake: 22)
                         verify_buffer_vec.push(22);
 
-                        log::info!("Client CV: {:?}", verify_buffer_vec);
                         self.send_application_slice(sockets, &mut verify_buffer_vec.clone())?;
                         // Update session
                         let cert_verify_len = verify_buffer_vec.len();
