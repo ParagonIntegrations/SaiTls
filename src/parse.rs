@@ -932,7 +932,7 @@ pub fn parse_asn1_der_attribute_type_and_value(bytes: &[u8]) -> IResult<&[u8], A
     )(set)?;
 
     // Verify that tag_val is either "PrintableString or UTF8String"
-    if tag_val != 0x13 && tag_val != 0x0C {
+    if tag_val != 0x13 && tag_val != 0x0C && tag_val != 0x16 {
         return Err(nom::Err::Error((bytes, ErrorKind::Verify)));
     }
 
