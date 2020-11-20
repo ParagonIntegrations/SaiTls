@@ -613,19 +613,23 @@ impl<'a> Session<'a> {
 
             // Usual procedures: update hash
             self.hash.update(cert_verify_slice);
-
             // At last, update client state
             self.state = TlsState::WAIT_FINISHED;
-
             return;
         }
 
+        // ED25519 only accepts PureEdDSA implementation
         if signature_algorithm == SignatureScheme::ed25519 {
-            let verify_hash = Sha512::new()
-                .chain(&[0x20; 64])
-                .chain("TLS 1.3, server CertificateVerify")
-                .chain(&[0])
-                .chain(&transcript_hash);
+            // 64 bytes of 0x20
+            // 33 bytes of text
+            // 1 byte of 0
+            // potentially 48 bytes of transcript hash
+            // 146 bytes in total
+            let mut verify_message: Vec<u8, U146> = Vec::new();
+            verify_message.extend_from_slice(&[0x20; 64]).unwrap();
+            verify_message.extend_from_slice(b"TLS 1.3, server CertificateVerify").unwrap();
+            verify_message.extend_from_slice(&[0]).unwrap();
+            verify_message.extend_from_slice(&transcript_hash).unwrap();
             let ed25519_signature = ed25519_dalek::Signature::try_from(
                 signature
             ).unwrap();
@@ -633,15 +637,13 @@ impl<'a> Session<'a> {
                 .unwrap()
                 .get_ed25519_public_key()
                 .unwrap()
-                .verify_prehashed(verify_hash, None, &ed25519_signature)
+                .verify_strict(&verify_message, &ed25519_signature)
                 .unwrap();
             
             // Usual procedures: update hash
             self.hash.update(cert_verify_slice);
-
             // At last, update client state
             self.state = TlsState::WAIT_FINISHED;
-
             return;
         }
 
@@ -709,7 +711,6 @@ impl<'a> Session<'a> {
                     .verify(
                         padding, &verify_hash, signature
                     );
-                log::info!("Algorithm {:?} Certificate verify: {:?}", signature_algorithm, verify_result);
                 if verify_result.is_err() {
                     todo!()
                 }
@@ -1174,7 +1175,6 @@ impl<'a> Session<'a> {
                 } else {
                     unreachable!()
                 };
-            log::info!("Client Transcript Hash: {:?}", transcript_hash);
             
             use crate::tls_packet::SignatureScheme::*;
             // RSA signature must be with PSS padding scheme
@@ -1299,11 +1299,12 @@ impl<'a> Session<'a> {
                 },
 
                 CertificatePrivateKey::ED25519 { cert_eddsa_key } => {
-                    let verify_hash = sha2::Sha512::new()
-                        .chain(&[0x20; 64])
-                        .chain("TLS 1.3, client CertificateVerify")
-                        .chain(&[0x00])
-                        .chain(&transcript_hash);
+                    // Similar to server CertificateVerify
+                    let mut verify_message: Vec<u8, U146> = Vec::new();
+                    verify_message.extend_from_slice(&[0x20; 64]).unwrap();
+                    verify_message.extend_from_slice(b"TLS 1.3, client CertificateVerify").unwrap();
+                    verify_message.extend_from_slice(&[0]).unwrap();
+                    verify_message.extend_from_slice(&transcript_hash).unwrap();
                     
                     // Ed25519 requires a key-pair to sign
                     // Get public key from certificate
@@ -1326,10 +1327,10 @@ impl<'a> Session<'a> {
                         &keypair_bytes
                     ).unwrap();
 
+                    use ed25519_dalek::Signer;
                     let sig_vec = alloc::vec::Vec::from(
                         ed25519_keypair
-                            .sign_prehashed(verify_hash, None)
-                            .unwrap()
+                            .sign(&verify_message)
                             .as_ref()
                     );
 

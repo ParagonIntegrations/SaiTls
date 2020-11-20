@@ -731,7 +731,7 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
             // Verify that the signature is indeed correct
             TlsState::WAIT_CV => {
                 // Ensure that it is CertificateVerify
-                // let might_be_cert_verify = handshake_vec.remove(0);
+                log::info!("Got certificate verify");
                 let might_be_cert_verify = repr.handshake.take().unwrap();
                 if might_be_cert_verify.get_msg_type() != HandshakeType::CertificateVerify {
                     // Process the other handshakes in "handshake_vec"
@@ -745,9 +745,11 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                         might_be_cert_verify.length + 4
                     )(handshake_slice)
                         .map_err(|_| Error::Unrecognized)?;
+                log::info!("about to verify");
 
                 // Perform verification, update TLS state if successful
                 let (sig_alg, signature) = might_be_cert_verify.get_signature().unwrap();
+                log::info!("Got signature");
                 {
                     self.session.borrow_mut()
                         .client_update_for_wait_cv(
