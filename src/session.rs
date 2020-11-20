@@ -610,7 +610,14 @@ impl<'a> Session<'a> {
                 .verify_digest(
                     verify_hash, &ecdsa_signature
                 ).unwrap();
-            return
+
+            // Usual procedures: update hash
+            self.hash.update(cert_verify_slice);
+
+            // At last, update client state
+            self.state = TlsState::WAIT_FINISHED;
+
+            return;
         }
 
         if signature_algorithm == SignatureScheme::ed25519 {
@@ -628,7 +635,14 @@ impl<'a> Session<'a> {
                 .unwrap()
                 .verify_prehashed(verify_hash, None, &ed25519_signature)
                 .unwrap();
-            return
+            
+            // Usual procedures: update hash
+            self.hash.update(cert_verify_slice);
+
+            // At last, update client state
+            self.state = TlsState::WAIT_FINISHED;
+
+            return;
         }
 
         // Get verification hash, and verify the signature
@@ -1275,7 +1289,7 @@ impl<'a> Session<'a> {
                     
                     use p256::ecdsa::signature::DigestSigner;
                     let sig_vec = alloc::vec::Vec::from(
-                        cert_signing_key.sign_digest(verify_hash).as_ref()
+                        cert_signing_key.sign_digest(verify_hash).to_asn1().as_ref()
                     );
 
                     (

@@ -748,12 +748,14 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
 
                 // Perform verification, update TLS state if successful
                 let (sig_alg, signature) = might_be_cert_verify.get_signature().unwrap();
-                self.session.borrow_mut()
-                    .client_update_for_wait_cv(
-                        cert_verify_slice,
-                        sig_alg,
-                        signature
-                    );
+                {
+                    self.session.borrow_mut()
+                        .client_update_for_wait_cv(
+                            cert_verify_slice,
+                            sig_alg,
+                            signature
+                        );
+                }
                 log::info!("Received CV");
             },
 
