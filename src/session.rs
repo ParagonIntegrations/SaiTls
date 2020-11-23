@@ -512,7 +512,7 @@ impl<'a> Session<'a> {
         // Determine the supplied client certificate indeed has an
         // acceptable signature algorithm
         let mut private_key_algorithm_acceptable = false;
-        if let Some((private_key, cert)) = &self.cert_private_key {
+        if let Some((private_key, _cert)) = &self.cert_private_key {
             if let CertificatePrivateKey::RSA {..} = private_key {
                 for sig_alg in signature_algorithms.iter() {
                     use crate::tls_packet::SignatureScheme::*;
@@ -1412,6 +1412,7 @@ impl<'a> Session<'a> {
                 self.server_application_nonce.as_ref().unwrap(),
                 self.server_application_cipher.as_ref().unwrap()
             )},
+            TlsRole::Unknown => unreachable!()
         };
 
         // Calculate XOR'ed nonce
@@ -1443,6 +1444,7 @@ impl<'a> Session<'a> {
                 self.server_handshake_nonce.as_ref().unwrap(),
                 self.server_handshake_cipher.as_ref().unwrap()
             )},
+            TlsRole::Unknown => unreachable!()
         };
 
         // Calculate XOR'ed nonce
@@ -1474,6 +1476,7 @@ impl<'a> Session<'a> {
                 self.server_handshake_nonce.as_ref().unwrap(),
                 self.server_handshake_cipher.as_ref().unwrap()
             )},
+            TlsRole::Unknown => unreachable!()
         };
 
         // Calculate XOR'ed nonce
@@ -1508,6 +1511,7 @@ impl<'a> Session<'a> {
                 self.client_application_nonce.as_ref().unwrap(),
                 self.client_application_cipher.as_ref().unwrap()
             )},
+            TlsRole::Unknown => unreachable!()
         };
 
         // Calculate XOR'ed nonce
@@ -1545,6 +1549,7 @@ impl<'a> Session<'a> {
                 self.server_handshake_nonce.as_ref().unwrap(),
                 self.server_handshake_cipher.as_ref().unwrap()
             )},
+            TlsRole::Unknown => unreachable!()
         };
 
         // Calculate XOR'ed nonce
@@ -1579,6 +1584,7 @@ impl<'a> Session<'a> {
                 self.server_handshake_nonce.as_ref().unwrap(),
                 self.server_handshake_cipher.as_ref().unwrap()
             )},
+            TlsRole::Unknown => unreachable!()
         };
 
         // Calculate XOR'ed nonce
@@ -1606,12 +1612,21 @@ impl<'a> Session<'a> {
     pub(crate) fn increment_server_sequence_number(&mut self) {
         self.server_sequence_number += 1;
     }
+
+    pub(crate) fn get_session_role(&self) -> TlsRole {
+        self.role
+    }
+
+    pub(crate) fn becomes_client(&mut self) {
+        self.role = TlsRole::Client;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum TlsRole {
     Client,
     Server,
+    Unknown,
 }
 
 #[derive(Debug, Clone)]
@@ -1814,6 +1829,7 @@ impl Cipher {
     }
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 pub enum CertificatePublicKey {
     RSA {
@@ -1853,6 +1869,7 @@ impl CertificatePublicKey {
     }
 }
 
+#[allow(non_camel_case_types)]
 pub enum CertificatePrivateKey {
     RSA {
         cert_rsa_private_key: rsa::RSAPrivateKey

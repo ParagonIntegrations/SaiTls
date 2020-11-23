@@ -30,10 +30,6 @@ impl<'a> TlsBuffer<'a> {
         }
     }
 
-    pub(crate) fn get_size(&self) -> usize {
-        self.index.clone().into_inner()
-    }
-
     pub(crate) fn write(&mut self, data: &[u8]) -> Result<()> {
         let mut index = self.index.borrow_mut();
         if (self.buffer.len() - *index) < data.len() {
@@ -53,31 +49,6 @@ impl<'a> TlsBuffer<'a> {
         self.buffer[*index] = data;
         *index += 1;
         Ok(())
-    }
-
-    pub(crate) fn read_u8(&mut self) -> Result<u8> {
-        let mut index = self.index.borrow_mut();
-        if (self.buffer.len() - *index) < 1 {
-            return Err(Error::Exhausted);
-        }
-        let data = self.buffer[*index];
-        *index += 1;
-        Ok(data)
-    }
-
-    pub(crate) fn read_all(self) -> &'a [u8] {
-        &self.buffer[self.index.into_inner()..]
-    }
-
-    pub(crate) fn read_slice(&self, length: usize) -> Result<&[u8]> {
-        let mut index = self.index.borrow_mut();
-        if (self.buffer.len() - *index) < length {
-            return Err(Error::Exhausted);
-        }
-        let next_index = *index + length;
-        let slice = &self.buffer[*index..next_index];
-        *index = next_index;
-        Ok(slice)
     }
 
     pub(crate) fn enqueue_tls_repr(&mut self, tls_repr: TlsRepr<'a>) -> Result<()> {

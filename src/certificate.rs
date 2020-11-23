@@ -7,7 +7,6 @@ use chrono::{DateTime, FixedOffset};
 
 use crate::parse::parse_asn1_der_rsa_public_key;
 use crate::parse::parse_rsa_ssa_pss_parameters;
-use crate::parse::parse_ecdsa_signature;
 use crate::parse::parse_asn1_der_oid;
 
 use crate::Error as TlsError;
@@ -19,10 +18,9 @@ use sha1::{Sha1, Digest};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 use rsa::{PublicKey, RSAPublicKey, PaddingScheme, BigUint, Hash};
 
-use p256::ecdsa::signature::{Verifier, DigestVerifier};
+use p256::ecdsa::signature::{Verifier};
 
 use alloc::vec::Vec;
-use heapless::{ Vec as HeaplessVec, consts::* };
 
 use byteorder::{ByteOrder, NetworkEndian};
 
@@ -1234,7 +1232,7 @@ fn wrap_up_verification(
         // require_explicit_policy is 0, set explicit_policy_state to be 0
         if let ExtensionValue::PolicyConstraints {
             require_explicit_policy,
-            inhibit_policy_mapping
+            ..
         } = &extension.extension_value {
             if require_explicit_policy.is_some() {
                 if require_explicit_policy.unwrap() == 0 {

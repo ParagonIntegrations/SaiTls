@@ -3,6 +3,7 @@ use smoltcp::socket::TcpState;
 use smoltcp::socket::SocketHandle;
 use smoltcp::socket::SocketSet;
 use smoltcp::socket::TcpSocketBuffer;
+use smoltcp::socket::SocketRef;
 use smoltcp::wire::IpEndpoint;
 use smoltcp::Result;
 use smoltcp::Error;
@@ -20,7 +21,6 @@ use core::cell::RefCell;
 use rand_core::{RngCore, CryptoRng};
 use p256::{EncodedPoint, ecdh::EphemeralSecret};
 use ccm::consts::*;
-use aes_gcm::AeadInPlace;
 
 use nom::bytes::complete::take;
 use nom::error::ErrorKind;
@@ -52,20 +52,19 @@ pub(crate) enum TlsState {
     CONNECTED,
 }
 
-// TODO: Group up all session_specific parameters into a separate structure
-pub struct TlsSocket<'s, R: RngCore + CryptoRng>
+pub struct TlsSocket<'s>
 {
     tcp_handle: SocketHandle,
-    rng: R,
+    rng: &'s mut dyn crate::TlsRng,
     session: RefCell<Session<'s>>,
 }
 
-impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
+impl<'s> TlsSocket<'s> {
     pub fn new<'a, 'b, 'c>(
         sockets: &mut SocketSet<'a, 'b, 'c>,
         rx_buffer: TcpSocketBuffer<'b>,
         tx_buffer: TcpSocketBuffer<'b>,
-        rng: R,
+        rng: &'s mut dyn crate::TlsRng,
         certificate_with_key: Option<(
             crate::session::CertificatePrivateKey,
             Vec<&'s [u8]>
@@ -80,12 +79,29 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
             tcp_handle,
             rng,
             session: RefCell::new(
+                Session::new(TlsRole::Unknown, certificate_with_key)
+            ),
+        }
+    }
+
+    pub fn from_tcp_handle(
+        tcp_handle: SocketHandle,
+        rng: &'s mut dyn crate::TlsRng,
+        certificate_with_key: Option<(
+            crate::session::CertificatePrivateKey,
+            Vec<&'s [u8]>
+        )>
+    ) -> Self {
+        TlsSocket {
+            tcp_handle,
+            rng,
+            session: RefCell::new(
                 Session::new(TlsRole::Client, certificate_with_key)
             ),
         }
     }
 
-    pub fn tcp_connect<T, U>(
+    pub fn connect<T, U>(
         &mut self,
         sockets: &mut SocketSet,
         remote_endpoint: T,
@@ -95,32 +111,33 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
         T: Into<IpEndpoint>,
         U: Into<IpEndpoint>,
     {
+        // Start TCP handshake
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
-        if tcp_socket.state() == TcpState::Established {
-            Ok(())
-        } else {
-            tcp_socket.connect(remote_endpoint, local_endpoint)
-        }
+        tcp_socket.connect(remote_endpoint, local_endpoint)?;
+
+        // Permit TLS handshake as well
+        let mut session = self.session.borrow_mut();
+        session.becomes_client();
+        Ok(())
     }
 
-    pub fn tls_connect<DeviceT>(
-        &mut self,
-        iface: &mut EthernetInterface<DeviceT>,
-        sockets: &mut SocketSet,
-        now: Instant
-    ) -> Result<bool>
-    where
-        DeviceT: for<'d> Device<'d>
-    {
-        // Check tcp_socket connectivity
+    pub fn update_handshake(&mut self, sockets: &mut SocketSet) -> Result<bool> {
+        // Check TCP socket
         {
             let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
             tcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(1000)));
             if tcp_socket.state() != TcpState::Established {
+                log::info!("TCP not established");
                 return Ok(false);
             }
         }
-
+        // Check TLS session state
+        {
+            let role = self.session.borrow().get_session_role();
+            if role != crate::session::TlsRole::Client {
+                return Ok(true);
+            }
+        }
         // Handle TLS handshake through TLS states
         let tls_state = {
             self.session.borrow().get_tls_state()
@@ -193,19 +210,17 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                     self.session.borrow().need_to_send_client_certificate()
                 };
                 if need_to_send_client_cert {
-                    let (certificates_total_length, mut buffer_vec) = {
-                        let mut session = self.session.borrow_mut();
+                    let (certificates_total_length, buffer_vec) = {
+                        let session = self.session.borrow();
                         let mut buffer_vec: Vec<u8> = Vec::new();
                         let certificates = session
                             .get_private_certificate_slices()
                             .clone();
     
                         // Handshake level, client certificate byte followed by length (u24)
-                        let mut handshake_header: [u8; 4] = [11, 0, 0, 0];
                         // Certificate struct:
                         // request_context = X509: 0 (u8),
                         // certificate_list to be determined (u24)
-                        let mut certificate_header: [u8; 4] = [0, 0, 0, 0];
                         let mut certificates_total_length: u32 = 0;
     
                         // Append place holder bytes (8 of them) in the buffer vector
@@ -229,10 +244,9 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                                 );
     
                                 // Update length in Certificate struct
-                                certificates_total_length += (
+                                certificates_total_length += 
                                     // cert_data (len & data) AND extension (len & data)
-                                    3 + certificate_length + 2 + 0
-                                );
+                                    3 + certificate_length + 2 + 0;
     
                                 buffer_vec.extend_from_slice(&cert_data_length);
                                 buffer_vec.extend_from_slice(cert);
@@ -347,11 +361,11 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                     .client_update_for_server_connected(&inner_plaintext[..(inner_plaintext_length-1)]);
             }
 
-            _ => todo!()
+            // There is no need to care about handshake if it was completed
+            TlsState::CONNECTED => {
+                return Ok(true);
+            }
         }
-
-        // Poll the network interface
-        iface.poll(sockets, now);
 
         // Read for TLS packet
         // Proposition: Decouple all data from TLS record layer before processing
@@ -731,7 +745,6 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
             // Verify that the signature is indeed correct
             TlsState::WAIT_CV => {
                 // Ensure that it is CertificateVerify
-                log::info!("Got certificate verify");
                 let might_be_cert_verify = repr.handshake.take().unwrap();
                 if might_be_cert_verify.get_msg_type() != HandshakeType::CertificateVerify {
                     // Process the other handshakes in "handshake_vec"
@@ -745,11 +758,9 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                         might_be_cert_verify.length + 4
                     )(handshake_slice)
                         .map_err(|_| Error::Unrecognized)?;
-                log::info!("about to verify");
 
                 // Perform verification, update TLS state if successful
                 let (sig_alg, signature) = might_be_cert_verify.get_signature().unwrap();
-                log::info!("Got signature");
                 {
                     self.session.borrow_mut()
                         .client_update_for_wait_cv(
@@ -772,7 +783,7 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
 
                 // Take out the portion for server Finished
                 // Length of handshake header is 4
-                let (handshake_slice, server_finished_slice) = 
+                let (_handshake_slice, server_finished_slice) = 
                     take::<_, _, (&[u8], ErrorKind)>(
                         might_be_server_finished.length + 4
                     )(handshake_slice)
@@ -790,31 +801,6 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
 
             _ => {},
         }
-        Ok(())
-    }
-
-    // Generic inner send method, through TCP socket
-    fn send_tls_repr(&self, sockets: &mut SocketSet, tls_repr: TlsRepr) -> Result<()> {
-        let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
-        if !tcp_socket.can_send() {
-            return Err(Error::Illegal);
-        }
-        let mut array = [0; 2048];
-        let mut buffer = TlsBuffer::new(&mut array);
-        buffer.enqueue_tls_repr(tls_repr)?;
-        let buffer_size = buffer.get_size();
-
-        // Force send to return if send is unsuccessful
-        // Only update sequence number if the send is successful
-        tcp_socket.send_slice(buffer.into())
-            .and_then(
-                |size| if size == buffer_size {
-                    Ok(())
-                } else {
-                    Err(Error::Truncated)
-                }
-            )?;
-        self.session.borrow_mut().increment_client_sequence_number();
         Ok(())
     }
 
@@ -940,11 +926,15 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
                     (record_length + 5),
                     (
                         (record_length + 5),
-                        provided_data_capacity < (record_length + 5)
+                        provided_data_capacity >= (record_length + 5)
                     )
                 )
             }
         )?;
+
+        if !acceptable {
+            return Ok(0);
+        }
 
         // let recv_slice_size = tcp_socket.recv_slice(data)?;
 
@@ -1038,4 +1028,9 @@ impl<'s, R: RngCore + CryptoRng> TlsSocket<'s, R> {
 
         Ok(())
     }
+
+    pub fn get_tcp_handle(&self) -> SocketHandle {
+        self.tcp_handle
+    }
+
 }

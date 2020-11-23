@@ -76,14 +76,6 @@ impl<'a> TlsRepr<'a> {
         self
     }
 
-    pub(crate) fn change_cipher_spec(mut self) -> Self {
-        self.content_type = TlsContentType::ChangeCipherSpec;
-        self.version = TlsVersion::Tls12;
-        self.length = 1;
-        self.payload = Some((&[1]).to_vec());
-        self
-    }
-
     // TODO: Consider replace all these boolean function
     // into a single function that returns the HandshakeType.
     pub(crate) fn is_server_hello(&self) -> bool {
@@ -111,12 +103,6 @@ impl<'a> TlsRepr<'a> {
                 false
             }
         }
-    }
-
-    pub(crate) fn is_application_data(&self) -> bool {
-        self.content_type == TlsContentType::ApplicationData &&
-        self.handshake.is_none() &&
-        self.payload.is_some()
     }
 }
 
@@ -385,8 +371,6 @@ impl<'a> ClientHello<'a> {
         list.push(NamedGroup::x25519);
         list.push(NamedGroup::secp256r1);
 
-        let length = list.len()*2;
-
         // Use the list to generate all key shares and store in a vec
         let mut client_shares = Vec::new();
         let mut client_shares_length = 0;
@@ -590,10 +574,10 @@ pub(crate) enum SupportedVersions {
 impl SupportedVersions {
     pub(crate) fn get_length(&self) -> usize {
         match self {
-            Self::ClientHello { length, versions } => {
+            Self::ClientHello { length, .. } => {
                 usize::try_from(*length).unwrap() + 1
             }
-            Self::ServerHello { selected_version } => 2
+            Self::ServerHello { .. } => 2
         }
     }
 }
@@ -713,8 +697,8 @@ pub(crate) enum KeyShareEntryContent {
 impl KeyShareEntryContent {
     pub(crate) fn get_length(&self) -> usize {
         match self {
-            Self::KeyShareClientHello { length, client_shares } => 2 + usize::try_from(*length).unwrap(),
-            Self::KeyShareHelloRetryRequest { selected_group } => 2,
+            Self::KeyShareClientHello { length, .. } => 2 + usize::try_from(*length).unwrap(),
+            Self::KeyShareHelloRetryRequest { .. } => 2,
             Self::KeyShareServerHello { server_share } => server_share.get_length(),
         }
     }
@@ -760,12 +744,9 @@ pub(crate) enum CertificateEntryInfo<'a> {
 impl<'a> CertificateEntryInfo<'a> {
     pub(crate) fn get_certificate(&self) -> &Asn1DerCertificate {
         match self {
-            CertificateEntryInfo::RawPublicKey {
-                ASN1_subjectPublicKeyInfo_length,
-                ASN1_subjectPublicKeyInfo
-            } => todo!(),
+            CertificateEntryInfo::RawPublicKey { .. } => todo!(),
             CertificateEntryInfo::X509 {
-                cert_data_length, cert_data
+                cert_data, ..
             } => &cert_data
         }
     }

@@ -5,7 +5,7 @@
 // Anyway, the RSAPublicKey::verify() method does NOT care about random at all :)
 
 use rand_core::{RngCore, Error};
-use byteorder::{ByteOrder, NetworkEndian, BigEndian};
+use byteorder::{ByteOrder, NetworkEndian};
 
 pub struct FakeRandom {}
 

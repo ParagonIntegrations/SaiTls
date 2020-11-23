@@ -7,10 +7,8 @@ use nom::combinator::opt;
 use nom::sequence::preceded;
 use nom::sequence::tuple;
 use nom::error::ErrorKind;
-use nom::character::complete::digit0;
-use nom::character::is_digit;
 
-use chrono::{DateTime, FixedOffset, TimeZone};
+use chrono::{DateTime, FixedOffset};
 use heapless::{String, consts::*};
 
 use byteorder::{ByteOrder, NetworkEndian};
@@ -21,7 +19,6 @@ use crate::certificate::{
     Certificate                 as Asn1DerCertificate,
     Version                     as Asn1DerVersion,
     AlgorithmIdentifier         as Asn1DerAlgId,
-    Time                        as Asn1DerTime,
     Validity                    as Asn1DerValidity,
     SubjectPublicKeyInfo        as Asn1DerSubjectPublicKeyInfo,
     Extensions                  as Asn1DerExtensions,
@@ -71,7 +68,7 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], (&[u8], TlsRepr)> {
         use crate::tls_packet::TlsContentType::*;
         match repr.content_type {
             Handshake => {
-                let (rest, handshake) = complete(
+                let (_, handshake) = complete(
                     parse_handshake
                 )(bytes)?;
                 repr.handshake = Some(handshake);
