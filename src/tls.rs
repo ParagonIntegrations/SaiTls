@@ -117,31 +117,53 @@ impl<'s> TlsSocket<'s> {
 
         // Permit TLS handshake as well
         let mut session = self.session.borrow_mut();
-        session.becomes_client();
+        session.connect(
+            tcp_socket.remote_endpoint(),
+            tcp_socket.local_endpoint()
+        );
         Ok(())
     }
 
     pub fn update_handshake(&mut self, sockets: &mut SocketSet) -> Result<bool> {
-        // Check TCP socket
-        {
-            let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
-            tcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(1000)));
-            if tcp_socket.state() != TcpState::Established {
-                log::info!("TCP not established");
-                return Ok(false);
-            }
-        }
-        // Check TLS session state
-        {
-            let role = self.session.borrow().get_session_role();
-            if role != crate::session::TlsRole::Client {
-                return Ok(true);
-            }
-        }
         // Handle TLS handshake through TLS states
         let tls_state = {
             self.session.borrow().get_tls_state()
         };
+
+        // Check TCP socket/ TLS session
+        {
+            let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+            let mut tls_socket = self.session.borrow();
+
+            // Check if it should connect to client or not
+            if tls_socket.get_session_role() != crate::session::TlsRole::Client {
+                // Return true for no need to do anymore handshake
+                return Ok(true);
+            }
+
+            // Skip handshake processing if it is already completed
+            // However, redo TCP handshake if TLS socket is trying to connect and
+            // TCP socket is not connected
+            if tcp_socket.state() != TcpState::Established {
+                if tls_state == TlsState::START {
+                    // Restart TCP handshake is it is closed for some reason
+                    if !tcp_socket.is_open() {
+                        tcp_socket.connect(
+                            tls_socket.get_remote_endpoint(),
+                            tls_socket.get_local_endpoint()
+                        )?;                        
+                    }
+                    return Ok(false);
+                } else {
+                    // Do nothing, either handshake failed or the socket closed
+                    // after finishing the handshake
+                    return Ok(false);                    
+                }
+
+            }
+        }
+
+        // Handle TLS handshake through TLS states
         match tls_state {
             // Initiate TLS handshake
             TlsState::START => {
@@ -906,6 +928,15 @@ impl<'s> TlsSocket<'s> {
             return Ok(0);
         }
 
+        let mut session = self.session.borrow_mut();
+
+        // If the handshake is not completed, do not pull bytes out of the buffer
+        // through TlsSocket.recv_slice()
+        // Handshake recv should be through TCPSocket directly.
+        if session.get_tls_state() != TlsState::CONNECTED {
+            return Ok(0);
+        }
+
         // TODO: Use `recv` to receive instead
         // Issue with using recv slice:
         // Encrypted application data can cramp together into a TCP Segment
@@ -947,7 +978,6 @@ impl<'s> TlsSocket<'s> {
         }
         
         // Get Associated Data
-        let mut session = self.session.borrow_mut();
         let mut associated_data: [u8; 5] = [0; 5];
         associated_data.clone_from_slice(&data[..5]);
         // log::info!("Received encrypted appdata: {:?}", &data[..recv_slice_size]);
@@ -991,6 +1021,14 @@ impl<'s> TlsSocket<'s> {
     }
 
     pub fn send_slice(&self, sockets: &mut SocketSet, data: &[u8]) -> Result<()> {
+
+        // If the handshake is not completed, do not push bytes onto the buffer
+        // through TlsSocket.send_slice()
+        // Handshake send should be through TCPSocket directly.
+        if session.get_tls_state() != TlsState::CONNECTED {
+            return Ok(0);
+        }
+
         // Sending order:
         // 1. Associated data/ TLS Record layer
         // 2. Encrypted { Payload (data) | Content type: Application Data }

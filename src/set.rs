@@ -68,11 +68,9 @@ impl<'a> TlsSocketSet<'a> {
     {
         for socket in self.tls_sockets.iter_mut() {
             if socket.is_some() {
-                log::info!("Found TLS");
                 socket.as_mut()
                     .unwrap()
                     .update_handshake(sockets)?;
-                log::info!("Updated TLS");
             }
         }
 

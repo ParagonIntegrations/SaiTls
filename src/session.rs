@@ -10,6 +10,7 @@ use generic_array::GenericArray;
 use byteorder::{ByteOrder, NetworkEndian};
 use rsa::{RSAPublicKey, PublicKey, PaddingScheme, Hash as RSAHash};
 use hmac::{ Hmac, Mac, NewMac };
+use smoltcp::wire::IpEndpoint;
 
 use crate::tls::TlsState;
 use crate::tls_packet::CipherSuite;
@@ -25,6 +26,12 @@ type Aes128Ccm = Ccm<Aes128, U16, U12>;
 pub(crate) struct Session<'a> {
     state: TlsState,
     role: TlsRole,
+    // Local and remote endpoints of the socket
+    // TCP socket does store these 2 information and it is gettable
+    // However, upon invokation of `reset`, these endpoints are wiped out
+    // Should TLS socket requires TCP socket to restart, we need these info
+    local_endpoint: IpEndpoint,
+    remote_endpoint: IpEndpoint,
     // Session ID for this session
     session_id: Option<[u8; 32]>,
     // Changed cipher spec
@@ -84,6 +91,8 @@ impl<'a> Session<'a> {
         Self {
             state: TlsState::START,
             role,
+            local_endpoint: IpEndpoint::default(),
+            remote_endpoint: IpEndpoint::default(),
             session_id: None,
             changed_cipher_spec: false,
             latest_secret: None,
@@ -108,6 +117,17 @@ impl<'a> Session<'a> {
             need_send_client_cert: false,
             client_cert_verify_sig_alg: None
         }
+    }
+
+    pub(crate) fn connect(
+        &mut self,
+        remote_endpoint: IpEndpoint,
+        local_endpoint: IpEndpoint
+    ) {
+        self.role = TlsRole::Client;
+        self.state = TlsState::START;
+        self.local_endpoint = local_endpoint;
+        self.remote_endpoint = remote_endpoint;
     }
 
     // State transition from START to WAIT_SH
@@ -1143,6 +1163,14 @@ impl<'a> Session<'a> {
         self.state
     }
 
+    pub(crate) fn get_local_endpoint(&self) -> IpEndpoint {
+        self.local_endpoint
+    }
+
+    pub(crate) fn get_remote_endpoint(&self) -> IpEndpoint {
+        self.remote_endpoint
+    }
+
     pub(crate) fn has_completed_handshake(&self) -> bool {
         self.state == TlsState::CONNECTED
     }
@@ -1615,10 +1643,6 @@ impl<'a> Session<'a> {
 
     pub(crate) fn get_session_role(&self) -> TlsRole {
         self.role
-    }
-
-    pub(crate) fn becomes_client(&mut self) {
-        self.role = TlsRole::Client;
     }
 }
 
