@@ -46,7 +46,6 @@ use net::iface::EthernetInterface;
 use net::time::Instant;
 use net::phy::Device;
 
-use crate::tls::TlsSocket;
 use crate::set::TlsSocketSet;
 
 // One-call function for polling all sockets within socket set

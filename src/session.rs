@@ -149,8 +149,6 @@ impl<'a> Session<'a> {
     }
 
     // State transition from WAIT_SH to WAIT_EE
-    // TODO: Memory allocation
-    // It current dumps too much memory onto the stack on invocation
     pub(crate) fn client_update_for_sh(
         &mut self,
         cipher_suite: CipherSuite,

@@ -2,21 +2,7 @@ use smoltcp as net;
 
 use managed::ManagedSlice;
 use crate::tls::TlsSocket;
-use net::socket::SocketSetItem;
 use net::socket::SocketSet;
-use net::socket::SocketHandle;
-use net::socket::Socket;
-use net::socket::TcpSocket;
-use net::socket::AnySocket;
-use net::socket::SocketRef;
-use net::iface::EthernetInterface;
-use net::time::Instant;
-use net::phy::Device;
-
-use core::convert::From;
-use core::cell::RefCell;
-
-use alloc::vec::Vec;
 
 pub struct TlsSocketSet<'a> {
     tls_sockets: ManagedSlice<'a, Option<TlsSocket<'a>>>
