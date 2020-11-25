@@ -68,7 +68,7 @@ pub(crate) struct Session<'a> {
     // Reset to 0 on rekey AND key exchange
     // TODO: Force rekey if sequence number need to wrap (very low priority)
     client_sequence_number: u64,
-    pub server_sequence_number: u64,
+    pub(crate) server_sequence_number: u64,
     // Certificate public key
     // For Handling CertificateVerify
     cert_public_key: Option<CertificatePublicKey>,
@@ -89,7 +89,7 @@ impl<'a> Session<'a> {
             sha384: Sha384::new(),
         };
         Self {
-            state: TlsState::START,
+            state: TlsState::DEFAULT,
             role,
             local_endpoint: IpEndpoint::default(),
             remote_endpoint: IpEndpoint::default(),
@@ -119,15 +119,22 @@ impl<'a> Session<'a> {
         }
     }
 
+    // Store the local endpoints for retry TCP handshake
+    // TCP socket will reset endpoints on RST
     pub(crate) fn connect(
         &mut self,
         remote_endpoint: IpEndpoint,
         local_endpoint: IpEndpoint
     ) {
         self.role = TlsRole::Client;
-        self.state = TlsState::START;
+        self.state = TlsState::CLIENT_START;
         self.local_endpoint = local_endpoint;
         self.remote_endpoint = remote_endpoint;
+    }
+
+    pub(crate) fn listen(&mut self) {
+        self.role = TlsRole::Server;
+        self.state = TlsState::SERVER_START;
     }
 
     // State transition from START to WAIT_SH
@@ -139,7 +146,7 @@ impl<'a> Session<'a> {
         ch_slice: &[u8]
     ) {
         // Handle inappropriate call to move state
-        if self.state != TlsState::START || self.role != TlsRole::Client {
+        if self.state != TlsState::CLIENT_START || self.role != TlsRole::Client {
             todo!()
         }
         self.ecdhe_secret = Some((ecdhe_secret, x25519_secret));
@@ -582,7 +589,7 @@ impl<'a> Session<'a> {
         log::info!("client key: {:?}", self.cert_private_key.is_some());
 
         // Move to the next state
-        self.state = TlsState::WAIT_CERT;
+        self.state = TlsState::CLIENT_WAIT_CERT;
     }
 
     pub(crate) fn client_update_for_wait_cert_cr(
@@ -592,7 +599,7 @@ impl<'a> Session<'a> {
     ) {
         self.hash.update(cert_slice);
         self.cert_public_key.replace(cert_public_key);
-        self.state = TlsState::WAIT_CV;
+        self.state = TlsState::CLIENT_WAIT_CV;
     }
 
     pub(crate) fn client_update_for_wait_cv(
@@ -632,7 +639,7 @@ impl<'a> Session<'a> {
             // Usual procedures: update hash
             self.hash.update(cert_verify_slice);
             // At last, update client state
-            self.state = TlsState::WAIT_FINISHED;
+            self.state = TlsState::CLIENT_WAIT_FINISHED;
             return;
         }
 
@@ -661,7 +668,7 @@ impl<'a> Session<'a> {
             // Usual procedures: update hash
             self.hash.update(cert_verify_slice);
             // At last, update client state
-            self.state = TlsState::WAIT_FINISHED;
+            self.state = TlsState::CLIENT_WAIT_FINISHED;
             return;
         }
 
@@ -760,7 +767,7 @@ impl<'a> Session<'a> {
         self.hash.update(cert_verify_slice);
 
         // At last, update client state
-        self.state = TlsState::WAIT_FINISHED;
+        self.state = TlsState::CLIENT_WAIT_FINISHED;
     }
 
     pub(crate) fn client_update_for_wait_finished(
@@ -1112,10 +1119,10 @@ impl<'a> Session<'a> {
         // Hash was updated for key computation
 
         // At last, update client state
-        self.state = TlsState::SERVER_CONNECTED;
+        self.state = TlsState::SERVER_COMPLETED;
     }
 
-    pub(crate) fn client_update_for_certificate_in_server_connected(
+    pub(crate) fn client_update_for_certificate_in_server_completed(
         &mut self,
         client_certificate_slice: &[u8]
     )
@@ -1125,7 +1132,7 @@ impl<'a> Session<'a> {
         self.hash.update(client_certificate_slice);
     }
 
-    pub(crate) fn client_update_for_cert_verify_in_server_connected(
+    pub(crate) fn client_update_for_cert_verify_in_server_completed(
         &mut self,
         client_certificate_verify_slice: &[u8]
     )
@@ -1136,7 +1143,7 @@ impl<'a> Session<'a> {
     }
 
 
-    pub(crate) fn client_update_for_server_connected(
+    pub(crate) fn client_update_for_server_completed(
         &mut self,
         client_finished_slice: &[u8]
     )
@@ -1146,7 +1153,7 @@ impl<'a> Session<'a> {
         self.client_sequence_number = 0;
         self.server_sequence_number = 0;
         self.hash.update(client_finished_slice);
-        self.state = TlsState::CONNECTED;
+        self.state = TlsState::CLIENT_CONNECTED;
     }
 
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
@@ -1170,7 +1177,7 @@ impl<'a> Session<'a> {
     }
 
     pub(crate) fn has_completed_handshake(&self) -> bool {
-        self.state == TlsState::CONNECTED
+        self.state == TlsState::CLIENT_CONNECTED
     }
 
     pub(crate) fn receive_change_cipher_spec(&mut self) {

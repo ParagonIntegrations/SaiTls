@@ -227,15 +227,15 @@ pub(crate) enum CipherSuite {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ClientHello<'a> {
-    pub(crate) version: TlsVersion,         // Legacy: Must be Tls12 (0x0303)
+pub(crate) struct ClientHello {
+    pub(crate) version: TlsVersion,                     // Legacy: Must be Tls12 (0x0303)
     pub(crate) random: [u8; 32],
-    pub(crate) session_id_length: u8,       // Legacy: Keep it 32
-    pub(crate) session_id: [u8; 32],        // Legacy: Fill this with an unpredictable value
+    pub(crate) session_id_length: u8,                   // Legacy: Keep it 32
+    pub(crate) session_id: [u8; 32],                    // Legacy: Fill this with an unpredictable value
     pub(crate) cipher_suites_length: u16,
-    pub(crate) cipher_suites: &'a[CipherSuite],
-    pub(crate) compression_method_length: u8,   // Legacy: Must be 1, to contain a byte
-    pub(crate) compression_methods: u8,         // Legacy: Must be 1 byte of 0
+    pub(crate) cipher_suites: [Option<CipherSuite>; 5], // Will only realistically support 5 cipher suites
+    pub(crate) compression_method_length: u8,           // Legacy: Must be 1, to contain a byte
+    pub(crate) compression_methods: u8,                 // Legacy: Must be 1 byte of 0
     pub(crate) extension_length: u16,
     pub(crate) extensions: Vec<Extension>,
 }
@@ -243,7 +243,7 @@ pub(crate) struct ClientHello<'a> {
 #[derive(Debug, Clone)]
 pub(crate) enum HandshakeData<'a> {
     Uninitialized,
-    ClientHello(ClientHello<'a>),
+    ClientHello(ClientHello),
     ServerHello(ServerHello<'a>),
     EncryptedExtensions(EncryptedExtensions),
     Certificate(Certificate<'a>),
@@ -262,7 +262,7 @@ impl<'a> HandshakeData<'a> {
     }
 }
 
-impl<'a> ClientHello<'a> {
+impl ClientHello {
     pub(self) fn new(p256_secret: &EphemeralSecret, x25519_secret: &x25519_dalek::EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
         let mut client_hello = ClientHello {
             version: TlsVersion::Tls12,
@@ -270,18 +270,24 @@ impl<'a> ClientHello<'a> {
             session_id_length: 32,
             session_id,
             cipher_suites_length: 0,
-            cipher_suites: &[
-                CipherSuite::TLS_AES_128_GCM_SHA256,
-                CipherSuite::TLS_AES_256_GCM_SHA384,
-                CipherSuite::TLS_CHACHA20_POLY1305_SHA256,
-                CipherSuite::TLS_AES_128_CCM_SHA256,
+            cipher_suites: [
+                Some(CipherSuite::TLS_AES_128_GCM_SHA256),
+                Some(CipherSuite::TLS_AES_256_GCM_SHA384),
+                Some(CipherSuite::TLS_CHACHA20_POLY1305_SHA256),
+                Some(CipherSuite::TLS_AES_128_CCM_SHA256),
+                None
             ],
             compression_method_length: 1,
             compression_methods: 0,
             extension_length: 0,
             extensions: Vec::new(),
         };
-        client_hello.cipher_suites_length = u16::try_from(client_hello.cipher_suites.len() * 2).unwrap();
+        
+        for suite_option in client_hello.cipher_suites.iter() {
+            if suite_option.is_some() {
+                client_hello.cipher_suites_length += 2;
+            }
+        }
 
         client_hello.add_ch_supported_versions()
             .add_sig_algs()
@@ -457,12 +463,12 @@ impl<'a> ClientHello<'a> {
     }
 
     pub(crate) fn get_length(&self) -> usize {
-        let mut length: usize = 2;                    // TlsVersion size
-        length += 32;      // Random size
-        length += 1;                                     // Legacy session_id length size
-        length += 32;          // Legacy session_id size
-        length += 2;                                     // Cipher_suites_length size
-        length += self.cipher_suites.len() * 2;
+        let mut length: usize = 2;                          // TlsVersion size
+        length += 32;                                       // Random size
+        length += 1;                                        // Legacy session_id length size
+        length += 32;                                       // Legacy session_id size
+        length += 2;                                        // Cipher_suites_length size
+        length += usize::try_from(self.cipher_suites_length).unwrap();
         length += 1;
         length += 1;
         length += 2;
@@ -514,6 +520,9 @@ pub(crate) enum ExtensionType {
     PostHandshakeAuth = 49,
     SignatureAlgorithmsCert = 50,
     KeyShare = 51,
+
+    #[num_enum(default)]
+    Unknown = 0xFFFF,
 }
 
 impl ExtensionType {
@@ -544,6 +553,7 @@ pub(crate) enum ExtensionData {
     NegotiatedGroups(NamedGroupList),
     KeyShareEntry(KeyShareEntryContent),
     ServerName(ServerName),
+    Unsupported,
 }
 
 impl ExtensionData {

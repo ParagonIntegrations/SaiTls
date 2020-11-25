@@ -86,14 +86,16 @@ impl<'a> TlsBuffer<'a> {
         }
     }
 
-    fn enqueue_client_hello(&mut self, client_hello: ClientHello<'a>) -> Result<()> {
+    fn enqueue_client_hello(&mut self, client_hello: ClientHello) -> Result<()> {
         self.write_u16(client_hello.version.into())?;
         self.write(&client_hello.random)?;
         self.write_u8(client_hello.session_id_length)?;
         self.write(&client_hello.session_id)?;
         self.write_u16(client_hello.cipher_suites_length)?;
         for suite in client_hello.cipher_suites.iter() {
-            self.write_u16((*suite).into())?;
+            if let Some(cipher_suite) = suite {
+                self.write_u16((*cipher_suite).into())?;
+            }
         }
         self.write_u8(client_hello.compression_method_length)?;
         self.write_u8(client_hello.compression_methods)?;

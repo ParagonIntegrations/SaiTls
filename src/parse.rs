@@ -164,6 +164,11 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
     {
         use crate::tls_packet::HandshakeType::*;
         match repr.msg_type {
+            ClientHello => {
+                let (rest, data) = parse_client_hello(rest)?;
+                repr.handshake_data = data;
+                Ok((rest, repr))
+            },
             ServerHello => {
                 let (rest, data) = parse_server_hello(rest)?;
                 repr.handshake_data = data;
@@ -231,6 +236,79 @@ pub(crate) fn parse_handshake(bytes: &[u8]) -> IResult<&[u8], HandshakeRepr> {
             _ => todo!()
         }
     }
+}
+
+fn parse_client_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
+    let version = take(2_usize);
+    let random = take(32_usize);
+    let session_id_length = take(1_usize);
+    let (rest, (version, random, session_id_length)) = tuple((
+        version, random, session_id_length
+    ))(bytes)?;
+
+    let session_id_length = session_id_length[0];
+    let (rest, session_id) = take(session_id_length)(rest)?;
+
+    let (mut rest, cipher_suites_length) = take(2_usize)(rest)?;
+    let cipher_suites_length = NetworkEndian::read_u16(cipher_suites_length);
+    
+    let mut cipher_suites: [_; 5] = [None; 5];
+    let mut index = 0;
+    
+    // Read cipher suites
+    // Only 5 of them are supported in terms of enum availability
+    // AES_CCM_8 is not an acceptable cipher suite, but can still be recorded
+    for _ in 0..(cipher_suites_length/2) {
+        let (rem, cipher_suite) = take(2_usize)(rest)?;
+
+        if let Ok(cipher_suite) = CipherSuite::try_from(
+            NetworkEndian::read_u16(cipher_suite)
+        ) {
+            cipher_suites[index] = Some(cipher_suite);
+            index += 1;
+        }
+
+        rest = rem;
+    }
+
+    let (rest, compression_method_length) = take(1_usize)(rest)?;
+    let compression_method_length = compression_method_length[0];
+    // Can only have compression method being NULL (1 byte of 0)
+    let (rest, compression_methods) = take(compression_method_length)(rest)?;
+    if compression_methods != &[0] {
+        return Err(nom::Err::Failure((&bytes, ErrorKind::Verify)));
+    }
+
+    let (mut rest, extension_length) = take(2_usize)(rest)?;
+    let mut extension_length = NetworkEndian::read_u16(extension_length);
+
+    let mut client_hello = ClientHello {
+        version: TlsVersion::try_from(NetworkEndian::read_u16(version)).unwrap(),
+        random: [0; 32],
+        session_id_length,
+        session_id: [0; 32],
+        cipher_suites_length,
+        cipher_suites,
+        compression_method_length,
+        compression_methods: 0,
+        extension_length,
+        extensions: Vec::new(),
+    };
+
+    client_hello.random.clone_from_slice(&random);
+    &mut client_hello.session_id[
+        32-(usize::try_from(session_id_length).unwrap())..
+    ].clone_from_slice(&session_id);
+
+    while extension_length > 0 {
+        let (rem, extension) = parse_extension(rest, HandshakeType::ClientHello)?;
+        rest = rem;
+        extension_length -= u16::try_from(extension.get_length()).unwrap();
+
+        client_hello.extensions.push(extension);
+    }
+
+    Ok((rest, HandshakeData::ClientHello(client_hello)))
 }
 
 fn parse_server_hello(bytes: &[u8]) -> IResult<&[u8], HandshakeData> {
@@ -493,7 +571,7 @@ fn parse_finished(bytes: &[u8]) -> IResult<&[u8], Finished> {
     ))
 }
 
-fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8], Extension> {
+fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8], Extension> {    
     let extension_type = take(2_usize);
     let length = take(2_usize);
     
@@ -508,13 +586,44 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
     // Process extension data according to extension_type
     // TODO: Deal with HelloRetryRequest
     let (rest, extension_data) = {
-	    // TODO: Handle all mandatory extension types
+        log::info!("extension type: {:?}", extension_type);
+	    // TODO: Handle all mandatory extension type
         use ExtensionType::*;
         match extension_type {
             SupportedVersions => {
                 match handshake_type {
                     HandshakeType::ClientHello => {
-                        todo!()
+                        let (rest, versions_length) = take(1_usize)(rest)?;
+                        let versions_length = versions_length[0];
+
+                        let (rest, mut versions_slice) = take(versions_length)(rest)?;
+                        let mut versions = Vec::new();
+
+                        while versions_slice.len() != 0 {
+                            let (rem, version) = take(2_usize)(versions_slice)?;
+
+                            let tls_version = TlsVersion::try_from(
+                                NetworkEndian::read_u16(version)
+                            ).unwrap();
+                            if tls_version != TlsVersion::Unknown {
+                                versions.push(tls_version);
+                            }
+
+                            versions_slice = rem;
+                        }
+
+                        let client_supported_versions = ExtensionData::SupportedVersions(
+                            crate::tls_packet::SupportedVersions::ClientHello {
+                                length: versions_length,
+                                versions,
+                            }
+                        );
+
+                        (
+                            rest,
+                            client_supported_versions
+                        )
+
                     },
                     HandshakeType::ServerHello => {
                         let (rest, selected_version) = take(2_usize)(rest)?;
@@ -530,7 +639,7 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
                             )
                         )
                     },
-                    _ => todo!()
+                    _ => unreachable!()
                 }
             },
             SupportedGroups => {        // NamedGroupList
@@ -568,7 +677,44 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
             KeyShare => {
                 match handshake_type {
                     HandshakeType::ClientHello => {
-                        todo!()
+                        let (rest, length) = take(2_usize)(rest)?;
+                        let length = NetworkEndian::read_u16(length);
+                        let (rest, mut keyshares) = take(length)(rest)?;
+
+                        let mut client_shares = Vec::new();
+
+                        // Read all keyshares
+                        while keyshares.len() != 0 {
+                        	let group = take(2_usize);
+                        	let length = take(2_usize);
+                        	let (rem, (group, length)) = tuple((
+                        	    group, length
+                        	))(keyshares)?;
+
+                        	let mut key_share_entry = KeyShareEntry {
+                        	    group: NamedGroup::try_from(
+                        	        NetworkEndian::read_u16(group)
+                        	    ).unwrap(),
+                        	    length: NetworkEndian::read_u16(length),
+                        	    key_exchange: Vec::new()
+                        	};
+
+                        	let (rem, key_exchange_slice) = take(
+                        	    key_share_entry.length
+                        	)(rem)?;
+                        	key_share_entry.key_exchange.extend_from_slice(key_exchange_slice);
+
+                        	client_shares.push(key_share_entry);
+
+                        	keyshares = rem;
+                        }
+
+                        let key_share_ch = crate::tls_packet::KeyShareEntryContent::KeyShareClientHello {
+                            length,
+                            client_shares
+                        };
+
+                        (rest, ExtensionData::KeyShareEntry(key_share_ch))
                     },
                     HandshakeType::ServerHello => {
                         let group = take(2_usize);
@@ -625,8 +771,11 @@ fn parse_extension(bytes: &[u8], handshake_type: HandshakeType) -> IResult<&[u8]
                 };
 
                 (rest, ExtensionData::SignatureAlgorithms(signature_scheme_list))
+            },
+            _ => {
+                let (rest, _) = take(length)(rest)?;
+                (rest, ExtensionData::Unsupported)
             }
-            _ => todo!()
         }        
     };
 

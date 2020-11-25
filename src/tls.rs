@@ -36,15 +36,25 @@ use crate::session::{Session, TlsRole};
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
 pub(crate) enum TlsState {
-    START,
+    DEFAULT,            // The default state of the TLS socket
+    // Client state machine diagram
+    CLIENT_START,
     WAIT_SH,
     WAIT_EE,
     WAIT_CERT_CR,
-    WAIT_CERT,
-    WAIT_CV,
-    WAIT_FINISHED,
-    SERVER_CONNECTED,   // Additional state, for client to send Finished after server Finished
-    CONNECTED,
+    CLIENT_WAIT_CERT,
+    CLIENT_WAIT_CV,
+    CLIENT_WAIT_FINISHED,
+    SERVER_COMPLETED,   // Additional state, for client to send Finished after server Finished
+    CLIENT_CONNECTED,
+    // Server state machine diagram
+    SERVER_START,
+    NEGOTIATED,
+    WAIT_FLIGHT,
+    SERVER_WAIT_CERT,
+    SERVER_WAIT_CV,
+    SERVER_WAIT_FINISHED,
+    SERVER_CONNECTED,
 }
 
 pub struct TlsSocket<'s>
@@ -119,6 +129,25 @@ impl<'s> TlsSocket<'s> {
         Ok(())
     }
 
+    pub fn listen<T>(
+        &mut self,
+        sockets: &mut SocketSet,
+        local_endpoint: T
+    ) -> Result<()>
+    where
+        T: Into<IpEndpoint>
+    {
+        // Listen from TCP socket
+        let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+        tcp_socket.listen(local_endpoint)?;
+
+        // Update tls session to server_start
+        let mut session = self.session.borrow_mut();
+        session.listen();
+
+        Ok(())
+    }
+
     pub fn update_handshake(&mut self, sockets: &mut SocketSet) -> Result<bool> {
         // Handle TLS handshake through TLS states
         let tls_state = {
@@ -130,17 +159,17 @@ impl<'s> TlsSocket<'s> {
             let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
             let tls_socket = self.session.borrow();
 
-            // Check if it should connect to client or not
-            if tls_socket.get_session_role() != crate::session::TlsRole::Client {
-                // Return true for no need to do anymore handshake
-                return Ok(true);
-            }
+            // // Check if it should connect to client or not
+            // if tls_socket.get_session_role() != crate::session::TlsRole::Client {
+            //     // Return true for no need to do anymore handshake
+            //     return Ok(true);
+            // }
 
             // Skip handshake processing if it is already completed
             // However, redo TCP handshake if TLS socket is trying to connect and
             // TCP socket is not connected
             if tcp_socket.state() != TcpState::Established {
-                if tls_state == TlsState::START {
+                if tls_state == TlsState::CLIENT_START {
                     // Restart TCP handshake is it is closed for some reason
                     if !tcp_socket.is_open() {
                         tcp_socket.connect(
@@ -154,14 +183,15 @@ impl<'s> TlsSocket<'s> {
                     // after finishing the handshake
                     return Ok(false);                    
                 }
-
             }
         }
-
         // Handle TLS handshake through TLS states
         match tls_state {
+            // Do nothing on the default state
+            // Socket has not been assigned to be a client or server
+            TlsState::DEFAULT => {},
             // Initiate TLS handshake
-            TlsState::START => {
+            TlsState::CLIENT_START => {
                 // Prepare field that is randomised,
                 // Supply it to the TLS repr builder.
                 let ecdh_secret = EphemeralSecret::random(&mut self.rng);
@@ -219,21 +249,21 @@ impl<'s> TlsSocket<'s> {
 
             // TLS Client wait for server's certificate after receiveing a request
             // No need to send anything
-            TlsState::WAIT_CERT => {},
+            TlsState::CLIENT_WAIT_CERT => {},
 
             // TLS Client wait for server's certificate cerify
             // No need to send anything
-            TlsState::WAIT_CV => {},
+            TlsState::CLIENT_WAIT_CV => {},
 
             // Last step of server authentication
             // TLS Client wait for server's Finished handshake
             // No need to send anything
-            TlsState::WAIT_FINISHED => {}
+            TlsState::CLIENT_WAIT_FINISHED => {}
 
             // Send client Finished to end handshake
             // Also send certificate and certificate verify before client Finished if
             // server sent a CertificateRequest beforehand
-            TlsState::SERVER_CONNECTED => {
+            TlsState::SERVER_COMPLETED => {
                 // Certificate & CertificateVerify
                 let need_to_send_client_cert = {
                     self.session.borrow().need_to_send_client_certificate()
@@ -307,7 +337,7 @@ impl<'s> TlsSocket<'s> {
 
                     {
                         self.session.borrow_mut()
-                            .client_update_for_certificate_in_server_connected(
+                            .client_update_for_certificate_in_server_completed(
                             &buffer_vec[..(buffer_vec_length-1)]
                         );
                     }
@@ -361,7 +391,7 @@ impl<'s> TlsSocket<'s> {
 
                         {
                             self.session.borrow_mut()
-                                .client_update_for_cert_verify_in_server_connected(
+                                .client_update_for_cert_verify_in_server_completed(
                                     &verify_buffer_vec[..(cert_verify_len-1)]
                                 );
                         }
@@ -387,16 +417,21 @@ impl<'s> TlsSocket<'s> {
 
                 let inner_plaintext_length = inner_plaintext.len();
                 self.session.borrow_mut()
-                    .client_update_for_server_connected(&inner_plaintext[..(inner_plaintext_length-1)]);
+                    .client_update_for_server_completed(&inner_plaintext[..(inner_plaintext_length-1)]);
             }
 
             // There is no need to care about handshake if it was completed
-            TlsState::CONNECTED => {
+            TlsState::CLIENT_CONNECTED => {
                 return Ok(true);
             }
+
+            // This state waits for Client Hello handshake from a client
+            // There is nothing to send
+            TlsState::SERVER_START => {}
+
+            // Other states regarding server role
+            _ => {}
         }
-
-
 
         // Read for TLS packet
         // Proposition: Decouple all data from TLS record layer before processing
@@ -406,7 +441,15 @@ impl<'s> TlsSocket<'s> {
             let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
             tcp_socket.recv(
                 |buffer| {
+                    // log::info!("Received Buffer: {:?}", buffer);
                     let buffer_size = buffer.len();
+
+                    // Provide a way to end the process early
+                    if buffer_size == 0 {
+                        return (0, ())
+                    }
+
+                    log::info!("Received something");
                     
                     let mut tls_repr_vec: Vec<(&[u8], TlsRepr)> = Vec::new();
                     let mut bytes = &buffer[..buffer_size];
@@ -766,7 +809,7 @@ impl<'s> TlsSocket<'s> {
 
             // In this stage, server will send a certificate chain
             // Verify the certificate
-            TlsState::WAIT_CERT => {
+            TlsState::CLIENT_WAIT_CERT => {
                 // Verify that it is indeed an Certificate
                 let might_be_cert = repr.handshake.take().unwrap();
 
@@ -807,7 +850,7 @@ impl<'s> TlsSocket<'s> {
 
             // In this stage, server will eventually send a CertificateVerify
             // Verify that the signature is indeed correct
-            TlsState::WAIT_CV => {
+            TlsState::CLIENT_WAIT_CV => {
                 // Ensure that it is CertificateVerify
                 let might_be_cert_verify = repr.handshake.take().unwrap();
                 if might_be_cert_verify.get_msg_type() != HandshakeType::CertificateVerify {
@@ -837,7 +880,7 @@ impl<'s> TlsSocket<'s> {
             },
 
             // Client will receive a Finished handshake from server
-            TlsState::WAIT_FINISHED => {
+            TlsState::CLIENT_WAIT_FINISHED => {
                 // Ensure that it is Finished
                 let might_be_server_finished = repr.handshake.take().unwrap();
                 if might_be_server_finished.get_msg_type() != HandshakeType::Finished {
@@ -861,6 +904,18 @@ impl<'s> TlsSocket<'s> {
                         might_be_server_finished.get_verify_data().unwrap()
                     );
                 log::info!("Received server FIN");
+            },
+
+            // Server will reveice a Client Hello initiating the TLS handshake
+            TlsState::SERVER_START => {
+                // Ensure that is a Client Hello
+                let might_be_client_hello = repr.handshake.take().unwrap();
+                if might_be_client_hello.get_msg_type() != HandshakeType::ClientHello {
+                    // Throw alert
+                    todo!()
+                }
+
+                log::info!("Received client hello");
             }
 
             _ => {},
@@ -925,7 +980,7 @@ impl<'s> TlsSocket<'s> {
         // If the handshake is not completed, do not pull bytes out of the buffer
         // through TlsSocket.recv_slice()
         // Handshake recv should be through TCPSocket directly.
-        if session.get_tls_state() != TlsState::CONNECTED {
+        if session.get_tls_state() != TlsState::CLIENT_CONNECTED {
             return Ok(0);
         }
 
@@ -1008,7 +1063,7 @@ impl<'s> TlsSocket<'s> {
         // through TlsSocket.send_slice()
         // Handshake send should be through TCPSocket directly.
         let mut session = self.session.borrow_mut();
-        if session.get_tls_state() != TlsState::CONNECTED {
+        if session.get_tls_state() != TlsState::CLIENT_CONNECTED {
             return Ok(());
         }
 
