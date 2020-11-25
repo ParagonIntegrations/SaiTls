@@ -27,6 +27,7 @@ use smoltcp_tls::key::*;
 use smoltcp_tls::buffer::TlsBuffer;
 use smoltcp_tls::certificate::*;
 use smoltcp_tls::parse::*;
+use smoltcp_tls::TlsRng;
 
 struct CountingRng(u64);
 
@@ -51,6 +52,8 @@ impl RngCore for CountingRng {
 
 impl CryptoRng for CountingRng {}
 
+impl TlsRng for CountingRng {}
+
 static mut RNG: CountingRng = CountingRng(0);
 
 fn main() {
@@ -72,7 +75,7 @@ fn main() {
         )
     };
 
-    tls_socket.tcp_connect(
+    tls_socket.connect(
         &mut sockets,
         (Ipv4Address::new(192, 168, 1, 125), 1883),
         49600

@@ -915,6 +915,187 @@ impl<'s> TlsSocket<'s> {
                     todo!()
                 }
 
+                // Process as Client Hello
+                if let HandshakeData::ClientHello(client_hello)
+                    = might_be_client_hello.handshake_data
+                {
+                    // Checks on the client hello structure
+                    // Read session ID
+                    // Select acceptable TLS 1.3 cipher suite
+                    let session_id = client_hello.session_id;
+                    let accepted_cipher_suite = {
+                        let recognized_cipher_suite = client_hello.cipher_suites
+                            .iter()
+                            .find(|cipher_suite| {
+                                // CCM_8 is the only unsupported cipher suite
+                                if let Some(cipher) = cipher_suite {
+                                    cipher != &CipherSuite::TLS_AES_128_CCM_8_SHA256
+                                } else {
+                                    false
+                                }
+                            });
+                        if let Some(Some(nominated_cipher_suite)) = recognized_cipher_suite {
+                            nominated_cipher_suite
+                        } else {
+                            // Not appropriate cipher found
+                            // Send alert
+                            todo!()
+                        }
+                    };
+
+                    // Check on the handshakes
+                    // `supported_version` extension: only support TLS 1.3 (SSL 3.4)
+                    // `supported_groups` extension: select an acceptable ECDHE group
+                    // `key_share` extension: find the corresponding ECDHE shared key
+                    // `signature_algorithm`: pick a signature algorithm
+                    // Will not handle PSK, no 0-RTT
+                    let mut version_check = false;
+                    let mut offered_p256 = false;
+                    let mut offered_x25519 = false;
+                    let mut p256_public_key: Option<p256::EncodedPoint> = None;
+                    let mut x25519_public_key: Option<x25519_dalek::PublicKey> = None;
+                    let mut signature_schemes: Vec<SignatureScheme> =  Vec::new();
+
+                    // Verify that TLS 1.3 is offered by the client
+                    if let Some(supported_version_extension) = client_hello.extensions.iter().find(
+                        |extension| extension.extension_type == ExtensionType::SupportedVersions
+                    ) {
+                        if let ExtensionData::SupportedVersions(supported_version)
+                            = &supported_version_extension.extension_data
+                        {
+                            if let SupportedVersions::ClientHello { versions, .. }
+                                = supported_version
+                            {
+                                version_check = true;
+                                if versions.iter().find(
+                                    |&&version| version == TlsVersion::Tls13
+                                ).is_none()
+                                {
+                                    // TLS 1.3 was not offered by client
+                                    // Reject connection immediately
+                                    todo!()
+                                }
+                            } else {
+                                // Wrong variant appeared, probably malformed
+                                todo!()
+                            }
+                        } else {
+                            // Malformed TLS packet
+                            todo!()
+                        }
+                    } else {
+                        // No supported_version extension was found,
+                        // Terminate by sending alert
+                        todo!()
+                    }
+
+                    // Check offered ECDHE algorithm
+                    if let Some(supported_groups) = client_hello.extensions.iter().find(
+                        |extension| extension.extension_type == ExtensionType::SupportedGroups
+                    ) {
+                        if let ExtensionData::NegotiatedGroups(NamedGroupList { named_group_list, .. })
+                            = &supported_groups.extension_data
+                        {
+                            // Mark down the offered and acceptable group
+                            if let Some(group) = named_group_list.iter().find(
+                                |&&named_group| {
+                                    named_group == NamedGroup::secp256r1
+                                }
+                            ) {
+                                offered_p256 = true;
+                            }
+
+                            if let Some(group) = named_group_list.iter().find(
+                                |&&named_group| {
+                                    named_group == NamedGroup::x25519
+                                }
+                            ) {
+                                offered_x25519 = true;
+                            }
+                        } else {
+                            // Malformed TLS packet
+                            todo!()
+                        }
+                    } else {
+                        // Client did not offer ECDHE algorithm
+                        todo!()
+                    }
+
+                    // Select usable key
+                    if let Some(key_shares) = client_hello.extensions.iter().find(
+                        |extension| extension.extension_type == ExtensionType::KeyShare
+                    ) {
+                        if let ExtensionData::KeyShareEntry(
+                            KeyShareEntryContent::KeyShareClientHello { client_shares, .. }
+                        ) = &key_shares.extension_data {
+                            // Try P-256 first, if offered by client
+                            if offered_p256 {
+                                if let Some(p256_key) = client_shares.iter().find(
+                                    |key| {
+                                        key.group == NamedGroup::secp256r1
+                                    }
+                                ) {
+                                    p256_public_key.replace(
+                                        p256::EncodedPoint::from_untagged_bytes(
+                                            GenericArray::from_slice(
+                                                &p256_key.key_exchange[1..]
+                                            )
+                                        )
+                                    );
+                                }
+                            }
+
+                            // Then try X25519, if P-256 key is not found and x25519 is offered
+                            if offered_x25519 && p256_public_key.is_none() {
+                                if let Some(x25519_key) = client_shares.iter().find(
+                                    |key| {
+                                        key.group == NamedGroup::x25519
+                                    }
+                                ) {
+                                    // Prepare a 32-bytes buffer for the public key
+                                    let mut key_content: [u8; 32] = [0; 32];
+
+                                    key_content.clone_from_slice(&x25519_key.key_exchange);
+                                    x25519_public_key.replace(
+                                        x25519_dalek::PublicKey::from(
+                                            key_content
+                                        )
+                                    );
+                                }
+                            }
+
+                            // If there are no applicable offered client key,
+                            // consider sending a ClientHelloRetry
+                            if p256_public_key.is_none() && x25519_public_key.is_none() {
+                                todo!()
+                            }
+                        } else {
+                            // Malformed packet
+                            // Send alert to client
+                            todo!()
+                        }
+                    } else {
+                        // The key_share extension was not sent
+                        // Consider sending a ClientHelloRequest
+                        todo!()
+                    }
+
+                    // Select signature algorithm
+                    if let Some(signature_algorithms) = client_hello.extensions.iter().find(
+                        |extension| extension.extension_type == ExtensionType::SignatureAlgorithms
+                    ) {
+                        if let ExtensionData::SignatureAlgorithms(
+                            SignatureSchemeList { supported_signature_algorithms, .. }
+                        ) = &signature_algorithms.extension_data {
+                            signature_schemes.extend_from_slice(supported_signature_algorithms);
+                        }
+                    } else {
+                        // Will only accept authentication through certificate
+                        // Send alert if there are no signature algorithms extension
+                        todo!()
+                    }
+                }
+
                 log::info!("Received client hello");
             }
 
