@@ -9,6 +9,7 @@ use core::convert::TryInto;
 use alloc::vec::Vec;
 
 use crate::certificate::Certificate as Asn1DerCertificate;
+use crate::session::DiffieHellmanPublicKey;
 
 pub(crate) const HRR_RANDOM: [u8; 32] = [
     0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
@@ -59,7 +60,13 @@ impl<'a> TlsRepr<'a> {
         }
     }
 
-    pub(crate) fn client_hello(mut self, p256_secret: &EphemeralSecret, x25519_secret: &x25519_dalek::EphemeralSecret, random: [u8; 32], session_id: [u8; 32]) -> Self {
+    pub(crate) fn client_hello(
+        mut self,
+        p256_secret: &EphemeralSecret,
+        x25519_secret: &x25519_dalek::EphemeralSecret,
+        random: [u8; 32],
+        session_id: [u8; 32]
+    ) -> Self {
         self.content_type = TlsContentType::Handshake;
         self.version = TlsVersion::Tls10;
         let handshake_repr = {
@@ -69,6 +76,35 @@ impl<'a> TlsRepr<'a> {
                 ClientHello::new(p256_secret, x25519_secret, random, session_id)
             });
             repr.length = repr.handshake_data.get_length().try_into().unwrap();
+            repr
+        };
+        self.length = handshake_repr.get_length();
+        self.handshake = Some(handshake_repr);
+        self
+    }
+
+    pub(crate) fn server_hello(
+        mut self,
+        random: &'a [u8],
+        session_id: &'a [u8],
+        cipher_suite: CipherSuite,
+        server_ecdhe_public_key: DiffieHellmanPublicKey
+    ) -> Self {
+        self.content_type = TlsContentType::Handshake;
+        self.version = TlsVersion::Tls12;
+        let handshake_repr = {
+            let mut repr = HandshakeRepr::new();
+            repr.msg_type = HandshakeType::ServerHello;
+            repr.handshake_data = HandshakeData::ServerHello(
+                {
+                    ServerHello::new(
+                        random,
+                        session_id,
+                        cipher_suite,
+                        server_ecdhe_public_key
+                    )
+                }
+            );
             repr
         };
         self.length = handshake_repr.get_length();
@@ -256,7 +292,7 @@ impl<'a> HandshakeData<'a> {
     pub(crate) fn get_length(&self) -> usize {
         match self {
             HandshakeData::ClientHello(data) => data.get_length(),
-            HandshakeData::ServerHello(_data) => todo!(),
+            HandshakeData::ServerHello(data) => data.get_length(),
             _ => 0,
         }
     }
@@ -487,6 +523,121 @@ pub(crate) struct ServerHello<'a> {
     pub(crate) compression_method: u8,     // Always 0
     pub(crate) extension_length: u16,
     pub(crate) extensions: Vec<Extension>,
+}
+
+impl<'a> ServerHello<'a> {
+    pub(crate) fn new(
+        random: &'a[u8],
+        session_id_echo: &'a[u8],
+        cipher_suite: CipherSuite,
+        server_ecdhe_public_key: DiffieHellmanPublicKey,
+    ) -> Self {
+        let server_hello = Self {
+            version: TlsVersion::Tls12,
+            random,
+            session_id_echo_length: 32,
+            session_id_echo,
+            cipher_suite,
+            compression_method: 0,
+            extension_length: 0,
+            extensions: Vec::new()
+        };
+
+        server_hello.add_sh_supported_versions()
+            .add_key_share(server_ecdhe_public_key)
+            .finalise()
+    }
+
+    pub(crate) fn add_sh_supported_versions(mut self) -> Self {
+        let supported_version_server_hello = SupportedVersions::ServerHello {
+            selected_version: TlsVersion::Tls13
+        };
+        let extension_data = ExtensionData::SupportedVersions(
+            supported_version_server_hello
+        );
+        let extension = Extension {
+            extension_type: ExtensionType::SupportedVersions,
+            length: 2,
+            extension_data
+        };
+
+        // Push the extension into the vector
+        self.extensions.push(extension);
+        self
+    }
+
+    pub(crate) fn add_key_share(
+        mut self,
+        server_ecdh_public_key: DiffieHellmanPublicKey
+    ) -> Self {
+        let mut key_exchange: Vec<u8> = Vec::new();
+        use DiffieHellmanPublicKey::*;
+        let group = match server_ecdh_public_key {
+            SECP256R1 { encoded_point } => {
+                // Convert EncodedPoint into untagged bytes
+                // In the format of x || y
+                // Then put 0x04 before the bytes ( 0x04 || x || y )
+                key_exchange.push(0x04);
+                key_exchange.extend_from_slice(
+                    &encoded_point.to_untagged_bytes().unwrap()
+                );
+                NamedGroup::secp256r1
+            },
+            X25519 { public_key } => {
+                key_exchange.extend_from_slice(
+                    public_key.as_bytes()
+                );
+                NamedGroup::x25519
+            }
+        };
+
+        let length = u16::try_from(key_exchange.len()).unwrap();
+
+        let server_share = KeyShareEntry {
+            group,
+            length,
+            key_exchange
+        };
+
+        let key_share_entry_content = KeyShareEntryContent::KeyShareServerHello {
+            server_share
+        };
+
+        let extension_data = ExtensionData::KeyShareEntry(
+            key_share_entry_content
+        );
+
+        let extension = Extension {
+            extension_type: ExtensionType::KeyShare,
+            length: length + 2 + 2,     // 4 bytes precedes key_exchange, length(2) and group(2)
+            extension_data
+        };
+
+        self.extensions.push(extension);
+        self
+    }
+
+    pub(crate) fn finalise(mut self) -> Self {
+        let mut sum = 0;
+        for extension in self.extensions.iter() {
+            // TODO: Add up the extension length
+            sum += extension.get_length();
+        }
+        self.extension_length = sum.try_into().unwrap();
+        self
+    }
+
+    pub(crate) fn get_length(&self) -> usize {
+        let mut length: usize = 2;                          // TlsVersion size
+        length += 32;                                       // Random size
+        length += 1;                                        // Legacy session_id length size
+        length += 32;                                       // Legacy session_id size
+        length += 2;                                        // cipher_suites size
+        length += 1;                                        // Compression method: 0
+        length += 2;                                        // Extension_length
+        length += usize::try_from(self.extension_length).unwrap();
+        length
+    }
 }
 
 #[derive(Debug, Clone)]

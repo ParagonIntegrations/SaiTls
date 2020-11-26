@@ -1198,11 +1198,43 @@ impl<'a> Session<'a> {
         self.state = TlsState::NEGOTIATED;
     }
 
+    pub(crate) fn server_update_for_server_hello(
+        &mut self,
+        server_ecdhe_secret: DiffieHellmanPrivateKey,
+        server_hello_slice: &[u8]
+    ) {
+        todo!()
+    }
+
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
         if let Some(session_id_inner) = self.session_id {
             session_id_inner == session_id_echo
         } else {
             false
+        }
+    }
+
+    pub(crate) fn get_session_id(&self) -> &[u8] {
+        if let Some(session_id) = &self.session_id {
+            session_id
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub(crate) fn get_cipher_suite(&self) -> CipherSuite {
+        if let Some(cipher_suite) = self.server_selected_cipher {
+            cipher_suite
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub(crate) fn get_server_ecdhe_public_key(&self) -> DiffieHellmanPublicKey {
+        if let Some(server_ecdhe_public_key) = self.ecdhe_public {
+            server_ecdhe_public_key
+        } else {
+            unreachable!()
         }
     }
 
@@ -1963,11 +1995,21 @@ pub enum CertificatePrivateKey {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum DiffieHellmanPublicKey {
     SECP256R1 {
         encoded_point: p256::EncodedPoint
     },
     X25519 {
         public_key: x25519_dalek::PublicKey
+    }
+}
+
+pub enum DiffieHellmanPrivateKey {
+    SECP256R1 {
+        ephemeral_secret: p256::ecdh::EphemeralSecret
+    },
+    X25519 {
+        ephemeral_secret: x25519_dalek::EphemeralSecret
     }
 }

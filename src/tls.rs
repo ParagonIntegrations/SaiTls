@@ -429,6 +429,50 @@ impl<'s> TlsSocket<'s> {
             // There is nothing to send
             TlsState::SERVER_START => {}
 
+            // Respond to a Client Hello initiation with:
+            // - Server Hello
+            // - Encrypted Extensions
+            // - (Possible) Certificate Request
+            // - Certificate
+            // - CertificateVerify
+            // - Finished
+            TlsState::NEGOTIATED => {
+                let mut session = self.session.borrow_mut();
+                let mut random: [u8; 32] = [0; 32];
+                self.rng.fill_bytes(&mut random);
+                // Relay session id
+                let session_id = session.get_session_id();
+                let cipher_suite = session.get_cipher_suite();
+                let ecdhe_key = session.get_server_ecdhe_public_key();
+
+                let repr = TlsRepr::new().server_hello(
+                    &random,
+                    session_id,
+                    cipher_suite,
+                    ecdhe_key
+                );
+
+                {
+                    let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+                    tcp_socket.send(
+                        |data| {
+                            // Enqueue the TLS representation
+                            let mut buffer = TlsBuffer::new(data);
+                            if buffer.enqueue_tls_repr(repr).is_err() {
+                                return (0, ())
+                            }
+                            let slice: &[u8] = buffer.into();
+
+                            // Update session
+                            todo!();
+
+                            // Send the data
+                            (slice.len(), ())
+                        }
+                    )?;
+                }
+            }
+
             // Other states regarding server role
             _ => {}
         }
