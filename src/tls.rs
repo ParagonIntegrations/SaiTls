@@ -31,7 +31,7 @@ use crate::parse::{
     get_content_type_inner_plaintext
 };
 use crate::buffer::TlsBuffer;
-use crate::session::{Session, TlsRole};
+use crate::session::{Session, TlsRole, DiffieHellmanPublicKey};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
@@ -952,9 +952,10 @@ impl<'s> TlsSocket<'s> {
                     let mut version_check = false;
                     let mut offered_p256 = false;
                     let mut offered_x25519 = false;
-                    let mut p256_public_key: Option<p256::EncodedPoint> = None;
-                    let mut x25519_public_key: Option<x25519_dalek::PublicKey> = None;
-                    let mut signature_schemes: Vec<SignatureScheme> =  Vec::new();
+//                    let mut p256_public_key: Option<p256::EncodedPoint> = None;
+//                    let mut x25519_public_key: Option<x25519_dalek::PublicKey> = None;
+                    let mut ecdhe_public_key: Option<DiffieHellmanPublicKey> = None;
+                    let mut signature_algorithm: Option<SignatureScheme> = None;
 
                     // Verify that TLS 1.3 is offered by the client
                     if let Some(supported_version_extension) = client_hello.extensions.iter().find(
@@ -1035,18 +1036,20 @@ impl<'s> TlsSocket<'s> {
                                         key.group == NamedGroup::secp256r1
                                     }
                                 ) {
-                                    p256_public_key.replace(
-                                        p256::EncodedPoint::from_untagged_bytes(
-                                            GenericArray::from_slice(
-                                                &p256_key.key_exchange[1..]
+                                    ecdhe_public_key.replace(
+                                        DiffieHellmanPublicKey::SECP256R1 {
+                                            encoded_point: p256::EncodedPoint::from_untagged_bytes(
+                                                GenericArray::from_slice(
+                                                    &p256_key.key_exchange[1..]
+                                                )
                                             )
-                                        )
+                                        }
                                     );
                                 }
                             }
 
                             // Then try X25519, if P-256 key is not found and x25519 is offered
-                            if offered_x25519 && p256_public_key.is_none() {
+                            if offered_x25519 && ecdhe_public_key.is_none() {
                                 if let Some(x25519_key) = client_shares.iter().find(
                                     |key| {
                                         key.group == NamedGroup::x25519
@@ -1056,17 +1059,19 @@ impl<'s> TlsSocket<'s> {
                                     let mut key_content: [u8; 32] = [0; 32];
 
                                     key_content.clone_from_slice(&x25519_key.key_exchange);
-                                    x25519_public_key.replace(
-                                        x25519_dalek::PublicKey::from(
-                                            key_content
-                                        )
+                                    ecdhe_public_key.replace(
+                                        DiffieHellmanPublicKey::X25519 {
+                                            public_key: x25519_dalek::PublicKey::from(
+                                                key_content
+                                            )
+                                        }
                                     );
                                 }
                             }
 
                             // If there are no applicable offered client key,
                             // consider sending a ClientHelloRetry
-                            if p256_public_key.is_none() && x25519_public_key.is_none() {
+                            if ecdhe_public_key.is_none() {
                                 todo!()
                             }
                         } else {
@@ -1087,16 +1092,76 @@ impl<'s> TlsSocket<'s> {
                         if let ExtensionData::SignatureAlgorithms(
                             SignatureSchemeList { supported_signature_algorithms, .. }
                         ) = &signature_algorithms.extension_data {
-                            signature_schemes.extend_from_slice(supported_signature_algorithms);
+                            // Check compatibility of signature algorithms
+                            if let Some(certificate_private_key) = self.session.borrow().get_certificate_private_key() {
+                                use crate::session::CertificatePrivateKey::*;
+                                if let Some(server_signature_algorithm) = match certificate_private_key {
+                                    // Try RSA keys:
+                                    RSA { .. } => {
+                                        supported_signature_algorithms.iter().find(
+                                            |&&signature_algorithm| {
+                                                signature_algorithm == SignatureScheme::rsa_pkcs1_sha256 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pkcs1_sha384 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pkcs1_sha512 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pss_rsae_sha256 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pss_rsae_sha384 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pss_rsae_sha512 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pss_pss_sha256 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pss_pss_sha384 ||
+                                                    signature_algorithm == SignatureScheme::rsa_pss_pss_sha512
+                                            }
+                                        )
+                                    },
+                                    ECDSA_SECP256R1_SHA256 { .. } => {
+                                        supported_signature_algorithms.iter().find(
+                                            |&&signature_algorithm| {
+                                                signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256
+                                            }
+                                        )
+                                    },
+                                    ED25519 { .. } => {
+                                        supported_signature_algorithms.iter().find(
+                                            |&&signature_algorithm| {
+                                                signature_algorithm == SignatureScheme::ed25519
+                                            }
+                                        )
+                                    }
+                                } {
+                                    signature_algorithm = Some(*server_signature_algorithm);
+                                } else {
+                                    // Cannot find a suitable signature algorithm for the server side
+                                    // Terminate the negotiation with alert
+                                    todo!()
+                                }
+
+                            } else {
+                                // Server must have a certificate ready
+                                // Through this should be enforced when entering listening stage
+                                unreachable!()
+                            }
+                        } else {
+                            // Malformed packet, type does not match content
+                            todo!()
                         }
                     } else {
                         // Will only accept authentication through certificate
                         // Send alert if there are no signature algorithms extension
                         todo!()
                     }
-                }
 
-                log::info!("Received client hello");
+                    {
+                        let mut session = self.session.borrow_mut();
+                        session.server_update_for_begin(
+                            *accepted_cipher_suite,
+                            ecdhe_public_key.unwrap(),
+                            session_id,
+                            signature_algorithm.unwrap(),
+                            handshake_slice
+                        )
+                    }
+
+                    log::info!("Processed client hello")
+                }
             }
 
             _ => {},

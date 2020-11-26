@@ -44,6 +44,10 @@ pub(crate) struct Session<'a> {
     hash: Hash,
     // Ephemeral secret for ECDHE key exchange
     ecdhe_secret: Option<(EphemeralSecret, x25519_dalek::EphemeralSecret)>,
+    // Public key received from client side when listening
+    ecdhe_public: Option<DiffieHellmanPublicKey>,
+    // Server selected cipher_suite, but without enough keying info
+    server_selected_cipher: Option<CipherSuite>,
     // Block ciphers for client & server
     client_handshake_cipher: Option<Cipher>,
     server_handshake_cipher: Option<Cipher>,
@@ -98,6 +102,8 @@ impl<'a> Session<'a> {
             latest_secret: None,
             hash,
             ecdhe_secret: None,
+            ecdhe_public: None,
+            server_selected_cipher: None,
             client_handshake_cipher: None,
             server_handshake_cipher: None,
             client_application_cipher: None,
@@ -1156,6 +1162,42 @@ impl<'a> Session<'a> {
         self.state = TlsState::CLIENT_CONNECTED;
     }
 
+    pub(crate) fn server_update_for_begin(
+        &mut self,
+        cipher_suite: CipherSuite,
+        client_ecdhe_public_key: DiffieHellmanPublicKey,
+        session_id: [u8; 32],
+        server_signature_algorithm: SignatureScheme,
+        client_hello_slice: &[u8]
+    )
+    {
+        self.ecdhe_public.replace(client_ecdhe_public_key);
+        self.session_id.replace(session_id);
+        self.client_cert_verify_sig_alg.replace(server_signature_algorithm);
+        self.server_selected_cipher.replace(cipher_suite);
+
+        // Choose a hash algorithm based on the selected cipher_suite
+        self.hash = match cipher_suite {
+            CipherSuite::TLS_AES_128_CCM_SHA256 |
+            CipherSuite::TLS_CHACHA20_POLY1305_SHA256 |
+            CipherSuite::TLS_AES_128_GCM_SHA256 => {
+                Hash::select_sha256(self.hash.clone())
+            },
+            CipherSuite::TLS_AES_256_GCM_SHA384 => {
+                Hash::select_sha384(self.hash.clone())
+            },
+            // The remaining CCM_8 is not supported
+            _ => {
+                unreachable!()
+            }
+        };
+        // Update hash with the received client hello
+        self.hash.update(client_hello_slice);
+
+        // Update FSM state of TLS
+        self.state = TlsState::NEGOTIATED;
+    }
+
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
         if let Some(session_id_inner) = self.session_id {
             session_id_inner == session_id_echo
@@ -1191,6 +1233,16 @@ impl<'a> Session<'a> {
     pub(crate) fn get_private_certificate_slices(&self) -> Option<&alloc::vec::Vec<&[u8]>> {
         if let Some((_, cert_vec)) = &self.cert_private_key {
             Some(cert_vec)
+        } else {
+            None
+        }
+    }
+
+    // Motivation: To know if offered signature algorithms
+    //             can indeed be supported
+    pub(crate) fn get_certificate_private_key(&self) -> Option<&CertificatePrivateKey> {
+        if let Some((private_key, _)) = &self.cert_private_key {
+            Some(private_key)
         } else {
             None
         }
@@ -1908,5 +1960,14 @@ pub enum CertificatePrivateKey {
     },
     ED25519 {
         cert_eddsa_key: ed25519_dalek::SecretKey
+    }
+}
+
+pub enum DiffieHellmanPublicKey {
+    SECP256R1 {
+        encoded_point: p256::EncodedPoint
+    },
+    X25519 {
+        public_key: x25519_dalek::PublicKey
     }
 }
