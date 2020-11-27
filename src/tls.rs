@@ -31,7 +31,7 @@ use crate::parse::{
     get_content_type_inner_plaintext
 };
 use crate::buffer::TlsBuffer;
-use crate::session::{Session, TlsRole, DiffieHellmanPublicKey};
+use crate::session::{Session, TlsRole, DiffieHellmanPublicKey, DiffieHellmanPrivateKey};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(non_camel_case_types)]
@@ -437,23 +437,44 @@ impl<'s> TlsSocket<'s> {
             // - CertificateVerify
             // - Finished
             TlsState::NEGOTIATED => {
-                let mut session = self.session.borrow_mut();
                 let mut random: [u8; 32] = [0; 32];
                 self.rng.fill_bytes(&mut random);
-                // Relay session id
-                let session_id = session.get_session_id();
-                let cipher_suite = session.get_cipher_suite();
-                let ecdhe_key = session.get_server_ecdhe_public_key();
+                let (session_id, cipher_suite, server_ecdhe_public_key) = {
+                    let mut session = self.session.borrow();
+                    (
+                        session.get_session_id(),
+                        session.get_cipher_suite(),
+                        session.get_server_ecdhe_public_key()
+                    )
+                };
+                let ecdhe_private_key = match server_ecdhe_public_key {
+                    DiffieHellmanPublicKey::SECP256R1 { .. } => {
+                        DiffieHellmanPrivateKey::SECP256R1 {
+                            ephemeral_secret: {
+                                p256::ecdh::EphemeralSecret::random(&mut self.rng)
+                            }
+                        }
+                    },
+                    DiffieHellmanPublicKey::X25519 { .. } => {
+                        DiffieHellmanPrivateKey::X25519 {
+                            ephemeral_secret: {
+                                x25519_dalek::EphemeralSecret::new(&mut self.rng)
+                            }
+                        }
+                    }
+                };
+                let ecdhe_public_key = ecdhe_private_key.to_public_key();
 
+                // Construct and send SH
                 let repr = TlsRepr::new().server_hello(
                     &random,
-                    session_id,
+                    &session_id,
                     cipher_suite,
-                    ecdhe_key
+                    ecdhe_public_key
                 );
-
                 {
                     let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+                    let mut session = self.session.borrow_mut();
                     tcp_socket.send(
                         |data| {
                             // Enqueue the TLS representation
@@ -463,14 +484,35 @@ impl<'s> TlsSocket<'s> {
                             }
                             let slice: &[u8] = buffer.into();
 
-                            // Update session
-                            // todo!();
+                            // Update session after sending only SH
+                            session.server_update_for_server_hello(
+                                ecdhe_private_key,
+                                &slice[5..]
+                            );
 
                             // Send the data
                             (slice.len(), ())
                         }
                     )?;
                 }
+
+                // Construct and send minimalistic EE
+                let inner_plaintext: [u8; 7] = [
+                    0x08,               // EE type
+                    0x00, 0x00, 0x02,   // Length: 2
+                    0x00, 0x00,         // Length of extensions: 0
+                    22                  // Content type of InnerPlainText
+                ];
+                self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
+
+                let inner_plaintext_length = inner_plaintext.len();
+                {
+                    let mut session = self.session.borrow_mut();
+                    session.server_update_for_encrypted_extension(
+                        &inner_plaintext
+                    );
+                }
+
             }
 
             // Other states regarding server role
@@ -1222,16 +1264,19 @@ impl<'s> TlsSocket<'s> {
     // TODO: Rename this function. It is only good for client finished
     fn send_application_slice(&self, sockets: &mut SocketSet, slice: &mut [u8]) -> Result<()> {
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
+        log::info!("Got socket");
         if !tcp_socket.can_send() {
             return Err(Error::Illegal);
         }
 
+        log::info!("Socket usable");
         // Borrow session in advance
-        let mut client_session = self.session.borrow_mut();
+        let mut session = self.session.borrow_mut();
+        log::info!("Got session");
 
         // Pre-compute TLS record layer as associated_data
         let mut associated_data: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x00];
-        let auth_tag_length: u16 = match client_session.get_cipher_suite_type() {
+        let auth_tag_length: u16 = match session.get_cipher_suite_type() {
             Some(CipherSuite::TLS_AES_128_GCM_SHA256) |
             Some(CipherSuite::TLS_AES_256_GCM_SHA384) |
             Some(CipherSuite::TLS_AES_128_CCM_SHA256) |
@@ -1246,7 +1291,7 @@ impl<'s> TlsSocket<'s> {
             auth_tag_length + u16::try_from(slice.len()).unwrap()
         );
 
-        let auth_tag = client_session.encrypt_in_place_detached(
+        let auth_tag = session.encrypt_in_place_detached(
             &associated_data,
             slice
         ).map_err(|_| Error::Illegal)?;
@@ -1255,7 +1300,7 @@ impl<'s> TlsSocket<'s> {
         tcp_socket.send_slice(&slice)?;
         tcp_socket.send_slice(&auth_tag)?;
 
-        client_session.increment_client_sequence_number();
+        session.increment_local_sequence_number();
         Ok(())
     }
 
