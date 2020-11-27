@@ -196,335 +196,29 @@ impl<'a> Session<'a> {
             todo!()
         }
 
-        // Generate Handshake secret
+        // Select and update hash
         match cipher_suite {
             CipherSuite::TLS_AES_128_GCM_SHA256 |
             CipherSuite::TLS_CHACHA20_POLY1305_SHA256 |
             CipherSuite::TLS_AES_128_CCM_SHA256 => {
-                // Select 1 hash function, then update the hash
                 self.hash = Hash::select_sha256(self.hash.clone());
                 self.hash.update(sh_slice);
-
-                // Find early secret in terms wrapped in HKDF
-                let empty_psk: GenericArray<u8, <Sha256 as FixedOutput>::OutputSize> = Default::default();
-                let early_secret_hkdf =
-                    Hkdf::<Sha256>::new(None, &empty_psk);
-
-                // Find handshake secret
-                let empty_hash = Sha256::new().chain("");
-                let derived_secret = derive_secret(
-                    &early_secret_hkdf,
-                    "derived",
-                    empty_hash
-                );
-
-                let (handshake_secret, handshake_secret_hkdf) =
-                    Hkdf::<Sha256>::extract(
-                        Some(&derived_secret),
-                        &shared_secret_bytes
-                    );
-
-                // Store the handshake secret
-                self.latest_secret.replace(
-                    Vec::from_slice(&handshake_secret)
-                        .unwrap()
-                );
-
-                let client_handshake_traffic_secret = derive_secret(
-                    &handshake_secret_hkdf,
-                    "c hs traffic",
-                    self.hash.get_sha256_clone().unwrap()
-                );
-
-                let server_handshake_traffic_secret = derive_secret(
-                    &handshake_secret_hkdf,
-                    "s hs traffic",
-                    self.hash.get_sha256_clone().unwrap()
-                );
-
-                // Store client_handshake_traffic_secret and
-                // server_handshake_traffic_secret
-                // Initial values of both secrets don't matter
-                self.client_handshake_traffic_secret.replace(
-                    Vec::from_slice(&client_handshake_traffic_secret).unwrap()
-                );
-                self.server_handshake_traffic_secret.replace(
-                    Vec::from_slice(&server_handshake_traffic_secret).unwrap()
-                );
-
-                let client_handshake_traffic_secret_hkdf = Hkdf::<Sha256>::from_prk(&client_handshake_traffic_secret).unwrap();
-                let server_handshake_traffic_secret_hkdf = Hkdf::<Sha256>::from_prk(&server_handshake_traffic_secret).unwrap();
-
-                // Prepare holder for key and IV
-                let client_handshake_key: Vec<u8, U64> = {
-                    let mut client_handshake_key_holder: Vec<u8, U64> = match cipher_suite {
-                        // 16 bytes key size
-                        CipherSuite::TLS_AES_128_GCM_SHA256 |
-                        CipherSuite::TLS_AES_128_CCM_SHA256 => {
-                            Vec::from_slice(&[0; 16]).unwrap()
-                        },
-                        // 32 bytes key size
-                        CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
-                            Vec::from_slice(&[0; 32]).unwrap()
-                        },
-                        // Not using Sha256 (AES_GCM_256) / not supported (CCM_8)
-                        _ => unreachable!()
-                    };
-                    hkdf_expand_label(
-                        &client_handshake_traffic_secret_hkdf,
-                        "key",
-                        "",
-                        &mut client_handshake_key_holder
-                    );
-                    client_handshake_key_holder
-                };
-
-                let client_handshake_iv: Vec<u8, U12> = {
-                    let mut client_handshake_iv_holder = Vec::from_slice(&[0; 12]).unwrap();
-                    hkdf_expand_label(
-                        &client_handshake_traffic_secret_hkdf,
-                        "iv",
-                        "",
-                        &mut client_handshake_iv_holder
-                    );
-                    client_handshake_iv_holder
-                };
-
-                let server_handshake_key: Vec<u8, U64> = {
-                    let mut server_handshake_key_holder: Vec<u8, U64> = match cipher_suite {
-                        // 16 bytes key size
-                        CipherSuite::TLS_AES_128_GCM_SHA256 |
-                        CipherSuite::TLS_AES_128_CCM_SHA256 => {
-                            Vec::from_slice(&[0; 16]).unwrap()
-                        },
-                        // 32 bytes key size
-                        CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
-                            Vec::from_slice(&[0; 32]).unwrap()
-                        },
-                        // Not using Sha256 (AES_GCM_256) / not supported (CCM_8)
-                        _ => unreachable!()
-                    };
-                    hkdf_expand_label(
-                        &server_handshake_traffic_secret_hkdf,
-                        "key",
-                        "",
-                        &mut server_handshake_key_holder
-                    );
-                    server_handshake_key_holder
-                };
-
-                let server_handshake_iv: Vec<u8, U12> = {
-                    let mut server_handshake_iv_holder = Vec::from_slice(&[0; 12]).unwrap();
-                    hkdf_expand_label(
-                        &server_handshake_traffic_secret_hkdf,
-                        "iv",
-                        "",
-                        &mut server_handshake_iv_holder
-                    );
-                    server_handshake_iv_holder
-                };
-
-                // Store nonce
-                self.client_handshake_nonce = Some(client_handshake_iv);
-                self.server_handshake_nonce = Some(server_handshake_iv);
-
-                // Construct cipher from key & IV for client & server
-                // Store the ciphers
-                match cipher_suite {
-                    CipherSuite::TLS_AES_128_GCM_SHA256 => {
-                        let client_handshake_cipher = Aes128Gcm::new(
-                            GenericArray::from_slice(&client_handshake_key)
-                        );
-                        let server_handshake_cipher = Aes128Gcm::new(
-                            GenericArray::from_slice(&server_handshake_key)
-                        );
-                        self.client_handshake_cipher = Some(
-                            Cipher::Aes128Gcm {
-                                aes128gcm: client_handshake_cipher
-                            }
-                        );
-                        self.server_handshake_cipher = Some(
-                            Cipher::Aes128Gcm {
-                                aes128gcm: server_handshake_cipher
-                            }
-                        );
-                    },
-                    CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
-                        let client_handshake_cipher = ChaCha20Poly1305::new(
-                            GenericArray::from_slice(&client_handshake_key)
-                        );
-                        let server_handshake_cipher = ChaCha20Poly1305::new(
-                            GenericArray::from_slice(&server_handshake_key)
-                        );
-                        self.client_handshake_cipher = Some(
-                            Cipher::Chacha20poly1305 {
-                                chacha20poly1305: client_handshake_cipher
-                            }
-                        );
-                        self.server_handshake_cipher = Some(
-                            Cipher::Chacha20poly1305 {
-                                chacha20poly1305: server_handshake_cipher
-                            }
-                        );
-                    },
-                    CipherSuite::TLS_AES_128_CCM_SHA256 => {
-                        let client_handshake_cipher = Aes128Ccm::new(
-                            GenericArray::from_slice(&client_handshake_key)
-                        );
-                        let server_handshake_cipher = Aes128Ccm::new(
-                            GenericArray::from_slice(&server_handshake_key)
-                        );
-                        self.client_handshake_cipher = Some(
-                            Cipher::Ccm {
-                                ccm: client_handshake_cipher
-                            }
-                        );
-                        self.server_handshake_cipher = Some(
-                            Cipher::Ccm {
-                                ccm: server_handshake_cipher
-                            }
-                        );
-                    },
-                    _ => unreachable!()
-                }
             },
             CipherSuite::TLS_AES_256_GCM_SHA384 => {
-                // Select 1 hash function, then update the hash
                 self.hash = Hash::select_sha384(self.hash.clone());
                 self.hash.update(sh_slice);
-
-                // Find early secret in terms wrapped in HKDF
-                let empty_psk: GenericArray<u8, <Sha384 as FixedOutput>::OutputSize> = Default::default();
-                let early_secret_hkdf =
-                    Hkdf::<Sha384>::new(None, &empty_psk);
-
-                // Find handshake secret
-                let empty_hash = Sha384::new().chain("");
-                let derived_secret = derive_secret(
-                    &early_secret_hkdf,
-                    "derived",
-                    empty_hash
-                );
-
-                let (handshake_secret, handshake_secret_hkdf) =
-                    Hkdf::<Sha384>::extract(
-                        Some(&derived_secret),
-                        &shared_secret_bytes
-                    );
-
-                // Store the handshake secret
-                self.latest_secret.replace(
-                    Vec::from_slice(&handshake_secret)
-                        .unwrap()
-                );
-
-                let client_handshake_traffic_secret = derive_secret(
-                    &handshake_secret_hkdf,
-                    "c hs traffic",
-                    self.hash.get_sha384_clone().unwrap()
-                );
-
-                let server_handshake_traffic_secret = derive_secret(
-                    &handshake_secret_hkdf,
-                    "s hs traffic",
-                    self.hash.get_sha384_clone().unwrap()
-                );
-
-                // Store client_handshake_traffic_secret and
-                // server_handshake_traffic_secret
-                // Initial values of both secrets don't matter
-                self.client_handshake_traffic_secret.replace(
-                    Vec::from_slice(&client_handshake_traffic_secret).unwrap()
-                );
-                self.server_handshake_traffic_secret.replace(
-                    Vec::from_slice(&server_handshake_traffic_secret).unwrap()
-                );
-
-                let client_handshake_traffic_secret_hkdf = Hkdf::<Sha384>::from_prk(&client_handshake_traffic_secret).unwrap();
-                let server_handshake_traffic_secret_hkdf = Hkdf::<Sha384>::from_prk(&server_handshake_traffic_secret).unwrap();
-
-                // Prepare holder for key and IV
-                let client_handshake_key: Vec<u8, U64> = {
-                    // 32 bytes key size
-                    let mut client_handshake_key_holder: Vec<u8, U64> =
-                        Vec::from_slice(&[0; 32]).unwrap();
-
-                    hkdf_expand_label(
-                        &client_handshake_traffic_secret_hkdf,
-                        "key",
-                        "",
-                        &mut client_handshake_key_holder
-                    );
-                    client_handshake_key_holder
-                };
-
-                let client_handshake_iv: Vec<u8, U12> = {
-                    let mut client_handshake_iv_holder = Vec::from_slice(&[0; 12]).unwrap();
-                    hkdf_expand_label(
-                        &client_handshake_traffic_secret_hkdf,
-                        "iv",
-                        "",
-                        &mut client_handshake_iv_holder
-                    );
-                    client_handshake_iv_holder
-                };
-
-                let server_handshake_key: Vec<u8, U64> = {
-                    // 32 bytes key size
-                    let mut server_handshake_key_holder: Vec<u8, U64> =
-                        Vec::from_slice(&[0; 32]).unwrap();
-
-                    hkdf_expand_label(
-                        &server_handshake_traffic_secret_hkdf,
-                        "key",
-                        "",
-                        &mut server_handshake_key_holder
-                    );
-                    server_handshake_key_holder
-                };
-
-                let server_handshake_iv: Vec<u8, U12> = {
-                    let mut server_handshake_iv_holder = Vec::from_slice(&[0; 12]).unwrap();
-                    hkdf_expand_label(
-                        &server_handshake_traffic_secret_hkdf,
-                        "iv",
-                        "",
-                        &mut server_handshake_iv_holder
-                    );
-                    server_handshake_iv_holder
-                };
-
-                // Store nonce
-                self.client_handshake_nonce = Some(client_handshake_iv);
-                self.server_handshake_nonce = Some(server_handshake_iv);
-
-                let client_handshake_cipher = Aes256Gcm::new(
-                    GenericArray::from_slice(&client_handshake_key)
-                );
-                let server_handshake_cipher = Aes256Gcm::new(
-                    GenericArray::from_slice(&server_handshake_key)
-                );
-                self.client_handshake_cipher = Some(
-                    Cipher::Aes256Gcm {
-                        aes256gcm: client_handshake_cipher
-                    }
-                );
-                self.server_handshake_cipher = Some(
-                    Cipher::Aes256Gcm {
-                        aes256gcm: server_handshake_cipher
-                    }
-                );
-
             },
-            CipherSuite::TLS_AES_128_CCM_8_SHA256 => {
-                unreachable!()
-            }
-        };
-        self.state = TlsState::WAIT_EE;
+            _ => unreachable!()
+        }
 
-        // Key exchange occurred, set seq_num to 0.
-        self.client_sequence_number = 0;
-        self.server_sequence_number = 0;
+        // Generate Handshake secret
+        // Handle handshake key generation
+        self.find_handshake_keying_info(
+            &shared_secret_bytes,
+            cipher_suite
+        );
+        
+        self.state = TlsState::WAIT_EE;
     }
 
     pub(crate) fn client_update_for_ee(&mut self, ee_slice: &[u8]) {
@@ -1232,9 +926,40 @@ impl<'a> Session<'a> {
         }
 
         let server_selected_cipher = self.server_selected_cipher.take().unwrap();
+        // Handle handshake key generation
+        self.find_handshake_keying_info(
+            &shared_secret_bytes,
+            server_selected_cipher
+        )
+    }
+
+    pub(crate) fn server_update_for_encrypted_extension(
+        &mut self,
+        encryption_extension_slice: &[u8],
+    ) {
+        self.hash.update(encryption_extension_slice);
+    }
+
+    pub(crate) fn server_update_for_sent_certificate(
+        &mut self,
+        certificate_slice: &[u8]
+    ) {
+        self.hash.update(certificate_slice);
+    }
+
+    pub(crate) fn server_update_for_sent_certificate_verify(
+        &mut self,
+        certificate_verify_slice: &[u8]
+    ) {
+        self.hash.update(certificate_verify_slice);
+    }
+
+    fn find_handshake_keying_info(&mut self, shared_secret_bytes: &[u8], cipher_suite: CipherSuite) {
+        // Ensure that it is 32-bytes long
+        assert!(shared_secret_bytes.len() == 32);
 
         // Find handshake keys and IV
-        match server_selected_cipher {
+        match cipher_suite {
             CipherSuite::TLS_AES_128_CCM_SHA256 |
             CipherSuite::TLS_CHACHA20_POLY1305_SHA256 |
             CipherSuite::TLS_AES_128_GCM_SHA256 => {
@@ -1289,7 +1014,7 @@ impl<'a> Session<'a> {
 
                 // Prepare holder for key and IV
                 let client_handshake_key: Vec<u8, U64> = {
-                    let mut client_handshake_key_holder: Vec<u8, U64> = match server_selected_cipher {
+                    let mut client_handshake_key_holder: Vec<u8, U64> = match cipher_suite {
                         // 16 bytes key size
                         CipherSuite::TLS_AES_128_GCM_SHA256 |
                         CipherSuite::TLS_AES_128_CCM_SHA256 => {
@@ -1323,7 +1048,7 @@ impl<'a> Session<'a> {
                 };
 
                 let server_handshake_key: Vec<u8, U64> = {
-                    let mut server_handshake_key_holder: Vec<u8, U64> = match server_selected_cipher {
+                    let mut server_handshake_key_holder: Vec<u8, U64> = match cipher_suite {
                         // 16 bytes key size
                         CipherSuite::TLS_AES_128_GCM_SHA256 |
                         CipherSuite::TLS_AES_128_CCM_SHA256 => {
@@ -1362,7 +1087,7 @@ impl<'a> Session<'a> {
 
                 // Construct cipher from key & IV for client & server
                 // Store the ciphers
-                match server_selected_cipher {
+                match cipher_suite {
                     CipherSuite::TLS_AES_128_GCM_SHA256 => {
                         let client_handshake_cipher = Aes128Gcm::new(
                             GenericArray::from_slice(&client_handshake_key)
@@ -1546,33 +1271,8 @@ impl<'a> Session<'a> {
             CipherSuite::TLS_AES_128_CCM_8_SHA256 => unreachable!()
         }
 
-        // Will send EE, {CR}, Cert, CV FIN in the same state
-        // No need to mutate FSM
-
-        // Ensure that the sequence numbers start from 0
-        self.client_sequence_number = 0;
         self.server_sequence_number = 0;
-    }
-
-    pub(crate) fn server_update_for_encrypted_extension(
-        &mut self,
-        encryption_extension_slice: &[u8],
-    ) {
-        self.hash.update(encryption_extension_slice);
-    }
-
-    pub(crate) fn server_update_for_sent_certificate(
-        &mut self,
-        certificate_slice: &[u8]
-    ) {
-        self.hash.update(certificate_slice);
-    }
-
-    pub(crate) fn server_update_for_sent_certificate_verify(
-        &mut self,
-        certificate_verify_slice: &[u8]
-    ) {
-        self.hash.update(certificate_verify_slice);
+        self.client_sequence_number = 0;
     }
 
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {

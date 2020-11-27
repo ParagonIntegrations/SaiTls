@@ -1156,8 +1156,6 @@ impl<'s> TlsSocket<'s> {
                     let mut version_check = false;
                     let mut offered_p256 = false;
                     let mut offered_x25519 = false;
-//                    let mut p256_public_key: Option<p256::EncodedPoint> = None;
-//                    let mut x25519_public_key: Option<x25519_dalek::PublicKey> = None;
                     let mut ecdhe_public_key: Option<DiffieHellmanPublicKey> = None;
                     let mut signature_algorithm: Option<SignatureScheme> = None;
 
