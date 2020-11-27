@@ -365,7 +365,10 @@ impl<'s> TlsSocket<'s> {
                         {
                             let session = self.session.borrow();
                             let (sig_alg, signature) = session
-                                .get_client_certificate_verify_signature(&mut self.rng);
+                                .get_certificate_verify_signature(
+                                    &mut self.rng,
+                                    TlsRole::Client
+                                );
                             
                             let signature_length: u16 = u16::try_from(signature.len()).unwrap();
                             NetworkEndian::write_u24(
@@ -513,6 +516,120 @@ impl<'s> TlsSocket<'s> {
                     );
                 }
 
+                // TODO: Option to allow a certificate request
+
+                // Construct and send server certificate handshake content
+                let mut inner_plaintext = {
+                    let mut inner_plaintext: Vec<u8> = Vec::new();
+                    let session = self.session.borrow();
+                    let certificates = session.get_private_certificate_slices().clone();
+                    
+                    // Handshake level, client certificate byte followed by length (u24)
+                    // Certificate struct:
+                    // request_context = X509: 0 (u8),
+                    // certificate_list to be determined (u24)
+                    let mut certificates_total_length: u32 = 0;
+
+                    // Append place holder bytes (8 of them) in the buffer vector
+                    // Simpily copy the the headers back into the vector
+                    // when all certificates are appended into the vector
+                    inner_plaintext.extend_from_slice(&[11, 0, 0, 0, 0, 0, 0, 0]);
+
+                    // Certificate Entry struct(s)
+                    if let Some(certificate_list) = certificates {
+                        for cert in certificate_list.iter() {
+                            // cert_data length, to be determined (u24)
+                            let mut cert_data_length: [u8; 3] = [0, 0, 0];
+                            // extensions: no extension needed
+                            let extension: [u8; 2] = [0, 0];
+
+                            let certificate_length: u32 = u32::try_from(cert.len()).unwrap();
+
+                            NetworkEndian::write_u24(
+                                &mut cert_data_length,
+                                certificate_length
+                            );
+
+                            // Update length in Certificate struct
+                            certificates_total_length += 
+                                // cert_data (len & data) AND extension (len & data)
+                                3 + certificate_length + 2 + 0;
+
+                            inner_plaintext.extend_from_slice(&cert_data_length);
+                            inner_plaintext.extend_from_slice(cert);
+                            inner_plaintext.extend_from_slice(&extension);
+                        }
+                    }
+
+                    // Write total certificate length into Certificate struct
+                    NetworkEndian::write_u24(
+                        &mut inner_plaintext[5..8],
+                        certificates_total_length
+                    );
+
+                    // Write the length of the entire handshake
+                    NetworkEndian::write_u24(
+                        &mut inner_plaintext[1..4],
+                        // 4 bytes for the Certificate struct header
+                        certificates_total_length + 4
+                    );
+
+                    // Inner plaintext: record type 
+                    inner_plaintext.push(22);
+                    inner_plaintext
+                };
+
+                self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
+                
+                // Update session
+                {
+                    self.session.borrow_mut()
+                        .server_update_for_sent_certificate(&inner_plaintext);
+                }
+
+                // Construct and send certificate verify
+                let mut inner_plaintext = {
+                    let mut inner_plaintext = Vec::new();
+                    inner_plaintext.extend_from_slice(&[
+                        15,
+                        0, 0, 0,
+                        0, 0,
+                        0, 0
+                    ]);
+                    let session = self.session.borrow();
+                    let (sig_alg, signature) = session.get_certificate_verify_signature(
+                        &mut self.rng,
+                        TlsRole::Server
+                    );
+                    let signature_length: u16 = u16::try_from(signature.len()).unwrap();
+                    NetworkEndian::write_u24(
+                        &mut inner_plaintext[1..4],
+                        (signature_length + 4).into()
+                    );
+                    NetworkEndian::write_u16(
+                        &mut inner_plaintext[4..6],
+                        sig_alg.try_into().unwrap()
+                    );
+                    NetworkEndian::write_u16(
+                        &mut inner_plaintext[6..8],
+                        signature_length
+                    );
+                    inner_plaintext.extend_from_slice(&signature);
+                    inner_plaintext.push(22);   // Content type byte
+                    inner_plaintext
+                };
+
+                self.send_application_slice(
+                    sockets,
+                    &mut inner_plaintext.clone()
+                )?;
+
+                {
+                    self.session.borrow_mut()
+                        .server_update_for_sent_certificate_verify(
+                            &inner_plaintext[..]
+                        );
+                }
             }
 
             // Other states regarding server role

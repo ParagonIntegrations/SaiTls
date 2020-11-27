@@ -1561,6 +1561,20 @@ impl<'a> Session<'a> {
         self.hash.update(encryption_extension_slice);
     }
 
+    pub(crate) fn server_update_for_sent_certificate(
+        &mut self,
+        certificate_slice: &[u8]
+    ) {
+        self.hash.update(certificate_slice);
+    }
+
+    pub(crate) fn server_update_for_sent_certificate_verify(
+        &mut self,
+        certificate_verify_slice: &[u8]
+    ) {
+        self.hash.update(certificate_verify_slice);
+    }
+
     pub(crate) fn verify_session_id_echo(&self, session_id_echo: &[u8]) -> bool {
         if let Some(session_id_inner) = self.session_id {
             session_id_inner == session_id_echo
@@ -1635,7 +1649,11 @@ impl<'a> Session<'a> {
         }
     }
 
-    pub(crate) fn get_client_certificate_verify_signature<R: rand_core::RngCore>(&self, rng: &mut R)
+    pub(crate) fn get_certificate_verify_signature<R: rand_core::RngCore>(
+        &self,
+        rng: &mut R,
+        role: TlsRole
+    )
         -> (crate::tls_packet::SignatureScheme, alloc::vec::Vec<u8>) 
     {
         if let Some((private_key, client_certificate)) = &self.cert_private_key {
@@ -1709,36 +1727,39 @@ impl<'a> Session<'a> {
 
             match private_key {
                 CertificatePrivateKey::RSA { cert_rsa_private_key } => {
+                    macro_rules! make_transcript_hash {
+                        ($hash: ty) => {
+                            {
+                                <$hash>::new()
+                                    .chain(&[0x20; 64])
+                                    .chain({
+                                        match role {
+                                            TlsRole::Client => "TLS 1.3, client CertificateVerify",
+                                            TlsRole::Server => "TLS 1.3, server CertificateVerify",
+                                            _ => unreachable!()
+                                        }
+                                    })
+                                    .chain(&[0x00])
+                                    .chain(&transcript_hash)
+                                    .finalize()
+                            }
+                        }
+                    }
                     let sig_alg = self.client_cert_verify_sig_alg.unwrap();
                     let verify_hash: Vec<u8, U64> = match sig_alg {
                         rsa_pkcs1_sha256 | rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
                             Vec::from_slice(
-                                &sha2::Sha256::new()
-                                    .chain(&[0x20; 64])
-                                    .chain("TLS 1.3, client CertificateVerify")
-                                    .chain(&[0x00])
-                                    .chain(&transcript_hash)
-                                    .finalize()
+                                &make_transcript_hash!(Sha256)
                             ).unwrap()
                         },
                         rsa_pkcs1_sha384 | rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
                             Vec::from_slice(
-                                &sha2::Sha384::new()
-                                    .chain(&[0x20; 64])
-                                    .chain("TLS 1.3, client CertificateVerify")
-                                    .chain(&[0x00])
-                                    .chain(&transcript_hash)
-                                    .finalize()
+                                &make_transcript_hash!(Sha384)
                             ).unwrap()
                         },
                         rsa_pkcs1_sha512 | rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
                             Vec::from_slice(
-                                &sha2::Sha512::new()
-                                    .chain(&[0x20; 64])
-                                    .chain("TLS 1.3, client CertificateVerify")
-                                    .chain(&[0x00])
-                                    .chain(&transcript_hash)
-                                    .finalize()
+                                &make_transcript_hash!(Sha512)
                             ).unwrap()
                         },
                         _ => unreachable!()
