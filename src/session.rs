@@ -685,8 +685,6 @@ impl<'a> Session<'a> {
             // Compute verify_data using HMAC
             let mut hmac = Hmac::<Sha384>::new_varkey(&okm).unwrap();
             hmac.update(&transcript_hash);
-            log::info!("HMAC: {:?}", hmac);
-            log::info!("Received data: {:?}", server_verify_data);
             hmac.verify(server_verify_data).unwrap();
 
             // Update hash for key computation
@@ -952,6 +950,312 @@ impl<'a> Session<'a> {
         certificate_verify_slice: &[u8]
     ) {
         self.hash.update(certificate_verify_slice);
+    }
+
+    pub(crate) fn server_update_for_server_finished(
+        &mut self,
+        server_finished_slice: &[u8]
+    ) {
+        // Update hash for key computation
+        self.hash.update(server_finished_slice);
+
+        // Key calculation
+        if let Ok(sha256) = self.hash.get_sha256_clone() {
+            // Derive application traffic secret, key, IV on client's side
+            // 1. Derive secret from "Handshake Secret"
+            let hkdf = Hkdf::<Sha256>::from_prk(
+                // TLS requires the removal of secret if such secret is not of any use
+                // Replace "latest_secret" with None
+                self.latest_secret.as_ref().unwrap()
+            ).unwrap();
+
+            let empty_hash = Sha256::new().chain("");
+            let derived_secret = derive_secret(&hkdf, "derived", empty_hash);
+
+            // 2. HKDF-extract "Master Secret"
+            let zero_ikm: GenericArray<u8, <Sha256 as FixedOutput>::OutputSize>
+                = Default::default();
+            let (master_secret, master_secret_hkdf) = Hkdf::<Sha256>::extract(
+                Some(&derived_secret),
+                &zero_ikm
+            );
+
+            // Replace latest secret with "master_secret"
+            self.latest_secret.replace(
+                Vec::from_slice(&master_secret).unwrap()
+            );
+
+            // 3. Get application traffic secret
+            let client_application_traffic_secret = derive_secret(
+                &master_secret_hkdf,
+                "c ap traffic",
+                self.hash.get_sha256_clone().unwrap()
+            );
+
+            let server_application_traffic_secret = derive_secret(
+                &master_secret_hkdf,
+                "s ap traffic",
+                self.hash.get_sha256_clone().unwrap()
+            );
+
+            self.client_application_traffic_secret.replace(
+                Vec::from_slice(&client_application_traffic_secret).unwrap()
+            );
+            self.server_application_traffic_secret.replace(
+                Vec::from_slice(&server_application_traffic_secret).unwrap()
+            );
+
+            // 4. Replace cipher and IV
+            let client_application_traffic_hkdf = Hkdf::<Sha256>::from_prk(
+                &client_application_traffic_secret
+            ).unwrap();
+            let server_application_traffic_hkdf = Hkdf::<Sha256>::from_prk(
+                &server_application_traffic_secret
+            ).unwrap(); 
+
+            // Init key and IV holders
+            let cipher_suite = self.client_handshake_cipher.as_ref().unwrap().get_cipher_suite_type();
+
+            let (mut client_key_holder, mut client_iv_holder,
+                mut server_key_holder, mut server_iv_holder):
+                (Vec::<u8, U64>, Vec::<u8, U12>, Vec::<u8, U64>, Vec::<u8, U12>) =
+                match cipher_suite {
+                CipherSuite::TLS_AES_128_GCM_SHA256 => {
+                    (
+                        Vec::from_slice(&[0; 16]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap(),
+                        Vec::from_slice(&[0; 16]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap()
+                    )
+                },
+                CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
+                    (
+                        Vec::from_slice(&[0; 32]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap(),
+                        Vec::from_slice(&[0; 32]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap()
+                    )
+                },
+                CipherSuite::TLS_AES_128_CCM_SHA256 => {
+                    (
+                        Vec::from_slice(&[0; 16]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap(),
+                        Vec::from_slice(&[0; 16]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap()
+                    )
+                },
+                // TLS_AES_128_CCM_8_SHA256 is not offered
+                // TLS_AES_256_GCM_SHA384 should not have SHA256 as hash
+                _ => unreachable!()
+            };
+
+            // Derive Key and IV for both server and client
+            hkdf_expand_label(
+                &client_application_traffic_hkdf,
+                "key",
+                "",
+                &mut client_key_holder
+            );
+            hkdf_expand_label(
+                &client_application_traffic_hkdf,
+                "iv",
+                "",
+                &mut client_iv_holder
+            );
+            hkdf_expand_label(
+                &server_application_traffic_hkdf,
+                "key",
+                "",
+                &mut server_key_holder
+            );
+            hkdf_expand_label(
+                &server_application_traffic_hkdf,
+                "iv",
+                "",
+                &mut server_iv_holder
+            );
+
+            // Store IV/nonce
+            self.client_application_nonce.replace(client_iv_holder);
+            self.server_application_nonce.replace(server_iv_holder);
+
+            // Instantiate new ciphers
+            match cipher_suite {
+                CipherSuite::TLS_AES_128_GCM_SHA256 => {
+                    self.client_application_cipher.replace(
+                        Cipher::Aes128Gcm {
+                            aes128gcm: Aes128Gcm::new(
+                                &GenericArray::from_slice(&client_key_holder)
+                            )
+                        }
+                    );
+                    self.server_application_cipher.replace(
+                        Cipher::Aes128Gcm {
+                            aes128gcm: Aes128Gcm::new(
+                                &GenericArray::from_slice(&server_key_holder)
+                            )
+                        }
+                    );
+                },
+                CipherSuite::TLS_CHACHA20_POLY1305_SHA256 => {
+                    self.client_application_cipher.replace(
+                        Cipher::Chacha20poly1305 {
+                            chacha20poly1305: ChaCha20Poly1305::new(
+                                &GenericArray::from_slice(&client_key_holder)
+                            )
+                        }
+                    );
+                    self.server_application_cipher.replace(
+                        Cipher::Chacha20poly1305 {
+                            chacha20poly1305: ChaCha20Poly1305::new(
+                                &GenericArray::from_slice(&server_key_holder)
+                            )
+                        }
+                    );
+                },
+                CipherSuite::TLS_AES_128_CCM_SHA256 => {
+                    self.client_application_cipher.replace(
+                        Cipher::Ccm {
+                            ccm: Aes128Ccm::new(
+                                &GenericArray::from_slice(&client_key_holder)
+                            )
+                        }
+                    );
+                    self.server_application_cipher.replace(
+                        Cipher::Ccm {
+                            ccm: Aes128Ccm::new(
+                                &GenericArray::from_slice(&server_key_holder)
+                            )
+                        }
+                    );
+                },
+                _ => unreachable!()
+            }
+        } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+            // Derive application traffic secret, key, IV on client's side
+            // 1. Derive secret from "Handshake Secret"
+            let hkdf = Hkdf::<Sha384>::from_prk(
+                self.latest_secret.as_ref().unwrap()
+            ).unwrap();
+
+            let empty_hash = Sha384::new().chain("");
+            let derived_secret = derive_secret(&hkdf, "derived", empty_hash);
+
+            // 2. HKDF-extract "Master Secret"
+            let zero_ikm: GenericArray<u8, <Sha384 as FixedOutput>::OutputSize>
+                = Default::default();
+            let (master_secret, master_secret_hkdf) = Hkdf::<Sha384>::extract(
+                Some(&derived_secret),
+                &zero_ikm
+            );
+
+            // Replace latest secret with "master_secret"
+            self.latest_secret.replace(
+                Vec::from_slice(&master_secret).unwrap()
+            );
+
+            // 3. Get application traffic secret
+            let client_application_traffic_secret = derive_secret(
+                &master_secret_hkdf,
+                "c ap traffic",
+                self.hash.get_sha384_clone().unwrap()
+            );
+
+            let server_application_traffic_secret = derive_secret(
+                &master_secret_hkdf,
+                "s ap traffic",
+                self.hash.get_sha384_clone().unwrap()
+            );
+
+            self.client_application_traffic_secret.replace(
+                Vec::from_slice(&client_application_traffic_secret).unwrap()
+            );
+            self.server_application_traffic_secret.replace(
+                Vec::from_slice(&server_application_traffic_secret).unwrap()
+            );
+
+            // 4. Replace cipher and IV
+            let client_application_traffic_hkdf = Hkdf::<Sha384>::from_prk(
+                &client_application_traffic_secret
+            ).unwrap();
+            let server_application_traffic_hkdf = Hkdf::<Sha384>::from_prk(
+                &server_application_traffic_secret
+            ).unwrap(); 
+
+            // Init key and IV holders
+            let cipher_suite = self.client_handshake_cipher.as_ref().unwrap().get_cipher_suite_type();
+
+            let (mut client_key_holder, mut client_iv_holder,
+                mut server_key_holder, mut server_iv_holder):
+                (Vec::<u8, U64>, Vec::<u8, U12>, Vec::<u8, U64>, Vec::<u8, U12>) =
+                match cipher_suite {
+                CipherSuite::TLS_AES_256_GCM_SHA384 => {
+                    (
+                        Vec::from_slice(&[0; 32]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap(),
+                        Vec::from_slice(&[0; 32]).unwrap(),
+                        Vec::from_slice(&[0; 12]).unwrap()
+                    )
+                },
+                // TLS_AES_128_CCM_8_SHA256 is not offered
+                // Only TLS_AES_256_GCM_SHA384 should have SHA384 as hash
+                _ => unreachable!()
+            };
+
+            // Derive Key and IV for both server and client
+            hkdf_expand_label(
+                &client_application_traffic_hkdf,
+                "key",
+                "",
+                &mut client_key_holder
+            );
+            hkdf_expand_label(
+                &client_application_traffic_hkdf,
+                "iv",
+                "",
+                &mut client_iv_holder
+            );
+            hkdf_expand_label(
+                &server_application_traffic_hkdf,
+                "key",
+                "",
+                &mut server_key_holder
+            );
+            hkdf_expand_label(
+                &server_application_traffic_hkdf,
+                "iv",
+                "",
+                &mut server_iv_holder
+            );
+            
+            // Store IV/nonce
+            self.client_application_nonce.replace(client_iv_holder);
+            self.server_application_nonce.replace(server_iv_holder);
+
+            // Instantiate new ciphers
+            match cipher_suite {
+                CipherSuite::TLS_AES_256_GCM_SHA384 => {
+                    self.client_application_cipher.replace(
+                        Cipher::Aes256Gcm {
+                            aes256gcm: Aes256Gcm::new(
+                                &GenericArray::from_slice(&client_key_holder)
+                            )
+                        }
+                    );
+                    self.server_application_cipher.replace(
+                        Cipher::Aes256Gcm {
+                            aes256gcm: Aes256Gcm::new(
+                                &GenericArray::from_slice(&server_key_holder)
+                            )
+                        }
+                    );
+                },
+                _ => unreachable!()
+            }
+
+        } else {
+            unreachable!()
+        };
     }
 
     fn find_handshake_keying_info(&mut self, shared_secret_bytes: &[u8], cipher_suite: CipherSuite) {
@@ -1576,6 +1880,48 @@ impl<'a> Session<'a> {
         } else if let Ok(sha384) = self.hash.get_sha384_clone() {
             let hkdf = Hkdf::<Sha384>::from_prk(
                 self.client_handshake_traffic_secret.as_ref().unwrap()
+            ).unwrap();
+
+            // Compute finished_key
+            let mut okm: GenericArray::<u8, <Sha384 as Digest>::OutputSize> = 
+                Default::default();
+            hkdf_expand_label(&hkdf, "finished", "", &mut okm);
+
+            // Get transcript hash
+            let transcript_hash = sha384.finalize();
+
+            // Compute verify_data, store in heapless vec
+            let mut hmac = Hmac::<Sha384>::new_varkey(&okm).unwrap();
+            hmac.update(&transcript_hash);
+            Vec::from_slice(&hmac.finalize().into_bytes()).unwrap()
+
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub(crate) fn get_server_finished_verify_data(&self) -> Vec<u8, U64> {
+        if let Ok(sha256) = self.hash.get_sha256_clone() {
+            let hkdf = Hkdf::<Sha256>::from_prk(
+                self.server_handshake_traffic_secret.as_ref().unwrap()
+            ).unwrap();
+
+            // Compute finished_key
+            let mut okm: GenericArray::<u8, <Sha256 as Digest>::OutputSize> = 
+                Default::default();
+            hkdf_expand_label(&hkdf, "finished", "", &mut okm);
+
+            // Get transcript hash
+            let transcript_hash = sha256.finalize();
+
+            // Compute verify_data, store in heapless vec
+            let mut hmac = Hmac::<Sha256>::new_varkey(&okm).unwrap();
+            hmac.update(&transcript_hash);
+            Vec::from_slice(&hmac.finalize().into_bytes()).unwrap()
+
+        } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+            let hkdf = Hkdf::<Sha384>::from_prk(
+                self.server_handshake_traffic_secret.as_ref().unwrap()
             ).unwrap();
 
             // Compute finished_key

@@ -631,6 +631,29 @@ impl<'s> TlsSocket<'s> {
                             &inner_plaintext[..(inner_plaintext_length-1)]
                         );
                 }
+
+                // Construct and send server finished
+                let inner_plaintext: HeaplessVec<u8, U64> = {
+                    let verify_data = self.session.borrow()
+                        .get_server_finished_verify_data();
+                    let mut handshake_header: [u8; 4] = [20, 0, 0, 0];
+                    NetworkEndian::write_u24(
+                        &mut handshake_header[1..4],
+                        u32::try_from(verify_data.len()).unwrap()
+                    );
+                    let mut buffer = HeaplessVec::from_slice(&handshake_header).unwrap();
+                    buffer.extend_from_slice(&verify_data).unwrap();
+                    // Inner plaintext: record type
+                    buffer.push(22).unwrap();
+                    buffer
+                };
+                self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
+
+                let inner_plaintext_length = inner_plaintext.len();
+                // {
+                //     self.session.borrow_mut()
+                //         .server_update_for_server_finished(&inner_plaintext[..(inner_plaintext_length-1)]);                    
+                // }
             }
 
             // Other states regarding server role
