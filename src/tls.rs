@@ -512,7 +512,7 @@ impl<'s> TlsSocket<'s> {
                 {
                     let mut session = self.session.borrow_mut();
                     session.server_update_for_encrypted_extension(
-                        &inner_plaintext
+                        &inner_plaintext[..(inner_plaintext_length-1)]
                     );
                 }
 
@@ -580,11 +580,11 @@ impl<'s> TlsSocket<'s> {
                 };
 
                 self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
-                
+                let inner_plaintext_length = inner_plaintext.len();
                 // Update session
                 {
                     self.session.borrow_mut()
-                        .server_update_for_sent_certificate(&inner_plaintext);
+                        .server_update_for_sent_certificate(&inner_plaintext[..(inner_plaintext_length-1)]);
                 }
 
                 // Construct and send certificate verify
@@ -624,10 +624,11 @@ impl<'s> TlsSocket<'s> {
                     &mut inner_plaintext.clone()
                 )?;
 
+                let inner_plaintext_length = inner_plaintext.len();
                 {
                     self.session.borrow_mut()
                         .server_update_for_sent_certificate_verify(
-                            &inner_plaintext[..]
+                            &inner_plaintext[..(inner_plaintext_length-1)]
                         );
                 }
             }
@@ -1381,15 +1382,11 @@ impl<'s> TlsSocket<'s> {
     // TODO: Rename this function. It is only good for client finished
     fn send_application_slice(&self, sockets: &mut SocketSet, slice: &mut [u8]) -> Result<()> {
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
-        log::info!("Got socket");
         if !tcp_socket.can_send() {
             return Err(Error::Illegal);
         }
-
-        log::info!("Socket usable");
         // Borrow session in advance
         let mut session = self.session.borrow_mut();
-        log::info!("Got session");
 
         // Pre-compute TLS record layer as associated_data
         let mut associated_data: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x00];

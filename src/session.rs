@@ -1776,7 +1776,13 @@ impl<'a> Session<'a> {
                 CertificatePrivateKey::ECDSA_SECP256R1_SHA256 { cert_signing_key } => {
                     let verify_hash = sha2::Sha256::new()
                         .chain(&[0x20; 64])
-                        .chain("TLS 1.3, client CertificateVerify")
+                        .chain({
+                            match role {
+                                TlsRole::Client => "TLS 1.3, client CertificateVerify",
+                                TlsRole::Server => "TLS 1.3, server CertificateVerify",
+                                _ => unreachable!()
+                            }
+                        })
                         .chain(&[0x00])
                         .chain(&transcript_hash);
                     
@@ -1795,7 +1801,13 @@ impl<'a> Session<'a> {
                     // Similar to server CertificateVerify
                     let mut verify_message: Vec<u8, U146> = Vec::new();
                     verify_message.extend_from_slice(&[0x20; 64]).unwrap();
-                    verify_message.extend_from_slice(b"TLS 1.3, client CertificateVerify").unwrap();
+                    verify_message.extend_from_slice({
+                        match role {
+                            TlsRole::Client => b"TLS 1.3, client CertificateVerify",
+                            TlsRole::Server => b"TLS 1.3, server CertificateVerify",
+                            _ => unreachable!()
+                        }
+                    }).unwrap();
                     verify_message.extend_from_slice(&[0]).unwrap();
                     verify_message.extend_from_slice(&transcript_hash).unwrap();
                     
