@@ -464,7 +464,7 @@ impl<'s> TlsSocket<'s> {
                             let slice: &[u8] = buffer.into();
 
                             // Update session
-                            todo!();
+                            // todo!();
 
                             // Send the data
                             (slice.len(), ())

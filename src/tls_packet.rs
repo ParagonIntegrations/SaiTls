@@ -105,6 +105,7 @@ impl<'a> TlsRepr<'a> {
                     )
                 }
             );
+            repr.length = repr.handshake_data.get_length().try_into().unwrap();
             repr
         };
         self.length = handshake_repr.get_length();
