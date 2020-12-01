@@ -57,22 +57,22 @@ pub(crate) enum TlsState {
     SERVER_CONNECTED,
 }
 
-pub struct TlsSocket<'s>
+pub struct TlsSocket<'b>
 {
     tcp_handle: SocketHandle,
-    rng: &'s mut dyn crate::TlsRng,
-    session: RefCell<Session<'s>>,
+    rng: &'b mut dyn crate::TlsRng,
+    session: RefCell<Session<'b>>,
 }
 
-impl<'s> TlsSocket<'s> {
-    pub fn new<'a, 'b, 'c>(
+impl<'b> TlsSocket<'b> {
+    pub fn new<'a, 'c>(
         sockets: &mut SocketSet<'a, 'b, 'c>,
         rx_buffer: TcpSocketBuffer<'b>,
         tx_buffer: TcpSocketBuffer<'b>,
-        rng: &'s mut dyn crate::TlsRng,
+        rng: &'b mut dyn crate::TlsRng,
         certificate_with_key: Option<(
             crate::session::CertificatePrivateKey,
-            Vec<&'s [u8]>
+            Vec<&'b [u8]>
         )>
     ) -> Self
     where
@@ -89,22 +89,22 @@ impl<'s> TlsSocket<'s> {
         }
     }
 
-    pub fn from_tcp_handle(
-        tcp_handle: SocketHandle,
-        rng: &'s mut dyn crate::TlsRng,
-        certificate_with_key: Option<(
-            crate::session::CertificatePrivateKey,
-            Vec<&'s [u8]>
-        )>
-    ) -> Self {
-        TlsSocket {
-            tcp_handle,
-            rng,
-            session: RefCell::new(
-                Session::new(TlsRole::Client, certificate_with_key)
-            ),
-        }
-    }
+    // pub fn from_tcp_handle(
+    //     tcp_handle: SocketHandle,
+    //     rng: &'s mut dyn crate::TlsRng,
+    //     certificate_with_key: Option<(
+    //         crate::session::CertificatePrivateKey,
+    //         Vec<&'s [u8]>
+    //     )>
+    // ) -> Self {
+    //     TlsSocket {
+    //         tcp_handle,
+    //         rng,
+    //         session: RefCell::new(
+    //             Session::new(TlsRole::Client, certificate_with_key)
+    //         ),
+    //     }
+    // }
 
     pub fn connect<T, U>(
         &mut self,
