@@ -650,13 +650,19 @@ impl<'s> TlsSocket<'s> {
                 self.send_application_slice(sockets, &mut inner_plaintext.clone())?;
 
                 let inner_plaintext_length = inner_plaintext.len();
-                // {
-                //     self.session.borrow_mut()
-                //         .server_update_for_server_finished(&inner_plaintext[..(inner_plaintext_length-1)]);                    
-                // }
+                {
+                    self.session.borrow_mut()
+                        .server_update_for_server_finished(&inner_plaintext[..(inner_plaintext_length-1)]);                    
+                }
             }
 
-            // Other states regarding server role
+            // There is no need to care about handshake if it was completed
+            // This is to prevent accidental dequeing of application data
+            TlsState::SERVER_CONNECTED => {
+                return Ok(true);
+            }
+
+            // Other states
             _ => {}
         }
 
@@ -728,7 +734,7 @@ impl<'s> TlsSocket<'s> {
                                     &associated_data,
                                     &mut app_data
                                 ).unwrap();
-                                session.increment_server_sequence_number();
+                                session.increment_remote_sequence_number();
                             }
 
                             // Discard last 16 bytes (auth tag)
@@ -1387,6 +1393,32 @@ impl<'s> TlsSocket<'s> {
 
                     log::info!("Processed client hello")
                 }
+            },
+
+            TlsState::SERVER_WAIT_FINISHED => {
+                // Ensure that it is Finished
+                let might_be_client_finished = repr.handshake.take().unwrap();
+                if might_be_client_finished.get_msg_type() != HandshakeType::Finished {
+                    // Process the other handshakes in "handshake_vec"
+                    todo!()
+                }
+
+                // Take out the portion for server Finished
+                // Length of handshake header is 4
+                let (_handshake_slice, client_finished_slice) = 
+                    take::<_, _, (&[u8], ErrorKind)>(
+                        might_be_client_finished.length + 4
+                    )(handshake_slice)
+                        .map_err(|_| Error::Unrecognized)?;
+                
+                // Perform verification, update TLS state if successful
+                // Update traffic secret, reset sequence number
+                self.session.borrow_mut()
+                    .server_update_for_wait_finished(
+                        client_finished_slice,
+                        might_be_client_finished.get_verify_data().unwrap()
+                    );
+                log::info!("Received client FIN");
             }
 
             _ => {},
@@ -1450,7 +1482,8 @@ impl<'s> TlsSocket<'s> {
         // If the handshake is not completed, do not pull bytes out of the buffer
         // through TlsSocket.recv_slice()
         // Handshake recv should be through TCPSocket directly.
-        if session.get_tls_state() != TlsState::CLIENT_CONNECTED {
+        if session.get_tls_state() != TlsState::CLIENT_CONNECTED &&
+            session.get_tls_state() != TlsState::SERVER_CONNECTED {
             return Ok(0);
         }
 
@@ -1498,7 +1531,7 @@ impl<'s> TlsSocket<'s> {
             &associated_data,
             &mut data[5..recv_slice_size]
         ).unwrap();
-        session.increment_server_sequence_number();
+        session.increment_remote_sequence_number();
 
         // Make sure it is application data
         let (content_type, padding_start_index) =
@@ -1533,7 +1566,8 @@ impl<'s> TlsSocket<'s> {
         // through TlsSocket.send_slice()
         // Handshake send should be through TCPSocket directly.
         let mut session = self.session.borrow_mut();
-        if session.get_tls_state() != TlsState::CLIENT_CONNECTED {
+        if session.get_tls_state() != TlsState::CLIENT_CONNECTED &&
+            session.get_tls_state() != TlsState::SERVER_CONNECTED {
             return Ok(());
         }
 
@@ -1560,7 +1594,7 @@ impl<'s> TlsSocket<'s> {
             &associated_data,
             &mut vec
         ).unwrap();
-        session.increment_client_sequence_number();
+        session.increment_local_sequence_number();
 
         let mut tcp_socket = sockets.get::<TcpSocket>(self.tcp_handle);
         if !tcp_socket.can_send() {
