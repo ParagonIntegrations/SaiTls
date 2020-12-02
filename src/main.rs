@@ -66,10 +66,9 @@ fn main() {
     let mut tls_socket = unsafe {
         let tx_buffer = TcpSocketBuffer::new(&mut tx_storage[..]);
         let rx_buffer = TcpSocketBuffer::new(&mut rx_storage[..]);
+        let tcp_socket = smoltcp::socket::TcpSocket::new(rx_buffer, tx_buffer);
         TlsSocket::new(
-            &mut sockets,
-            rx_buffer,
-            tx_buffer,
+            tcp_socket,
             &mut RNG,
             None
         )

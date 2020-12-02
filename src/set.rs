@@ -3,25 +3,28 @@ use smoltcp as net;
 use managed::ManagedSlice;
 use crate::tls::TlsSocket;
 use net::socket::SocketSet;
+use net::phy::Device;
+use net::iface::EthernetInterface;
+use net::time::Instant;
 
-pub struct TlsSocketSet<'a> {
-    tls_sockets: ManagedSlice<'a, Option<TlsSocket<'a>>>
+pub struct TlsSocketSet<'a, 'b, 'c> {
+    tls_sockets: ManagedSlice<'a, Option<TlsSocket<'a, 'b, 'c>>>
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct TlsSocketHandle(usize);
 
-impl<'a> TlsSocketSet<'a> {
+impl<'a, 'b, 'c> TlsSocketSet<'a, 'b, 'c> {
     pub fn new<T>(tls_sockets: T) -> Self
     where
-        T: Into<ManagedSlice<'a, Option<TlsSocket<'a>>>>
+        T: Into<ManagedSlice<'a, Option<TlsSocket<'a, 'b, 'c>>>>
     {
         Self {
             tls_sockets: tls_sockets.into()
         }
     }
 
-    pub fn add(&mut self, socket: TlsSocket<'a>) -> TlsSocketHandle
+    pub fn add(&mut self, socket: TlsSocket<'a, 'b, 'c>) -> TlsSocketHandle
     {
         for (index, slot) in self.tls_sockets.iter_mut().enumerate() {
             if slot.is_none() {
@@ -43,20 +46,24 @@ impl<'a> TlsSocketSet<'a> {
         }
     }
 
-    pub fn get(&mut self, handle: TlsSocketHandle) -> &mut TlsSocket<'a> {
+    pub fn get(&mut self, handle: TlsSocketHandle) -> &mut TlsSocket<'a, 'b, 'c> {
         self.tls_sockets[handle.0].as_mut().unwrap()
     }
 
-    pub(crate) fn polled_by(
+    pub(crate) fn polled_by<DeviceT>(
         &mut self,
-        sockets: &mut SocketSet
+        sockets: &mut SocketSet,
+        iface: &mut EthernetInterface<DeviceT>,
+        now: Instant
     ) -> smoltcp::Result<bool>
+    where
+        DeviceT: for<'d> Device<'d>
     {
         for socket in self.tls_sockets.iter_mut() {
             if socket.is_some() {
                 socket.as_mut()
                     .unwrap()
-                    .update_handshake(sockets)?;
+                    .update_handshake(iface, now)?;
             }
         }
 

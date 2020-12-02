@@ -58,6 +58,6 @@ pub fn poll<DeviceT>(
 where
     DeviceT: for<'d> Device<'d>
 {
-    tls_sockets.polled_by(sockets)?;
+    tls_sockets.polled_by(sockets, iface, now)?;
     iface.poll(sockets, now).map_err(Error::PropagatedError)
 }
