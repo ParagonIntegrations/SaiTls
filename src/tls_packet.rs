@@ -30,6 +30,40 @@ pub(crate) enum TlsContentType {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+pub(crate) enum AlertType {
+    CloseNotify = 0,
+    UnexpectedMessage = 10,
+    BadRecordMac = 20,
+    RecordOverflow = 22,
+    HandshakeFailure = 40,
+    BadCertificate = 42,
+    UnsupportedCertificate = 43,
+    CertificateRevoked = 44,
+    CertificateExpired = 45,
+    CertificateUnknown = 46,
+    IllegalParameter = 47,
+    UnknownCA = 48,
+    AccessDenied = 49,
+    DecodeError = 50,
+    DecryptError = 51,
+    ProtocolVersion = 70,
+    InsufficientSecurity = 71,
+    InternalError = 80,
+    InappropriateFallback = 86,
+    UserCanceled = 90,
+    MissingExtension = 109,
+    UnsupportedExtension = 110,
+    UnrecognizedName = 112,
+    BadCertificateStatusResponse = 113,
+    UnknownPSKIdentity = 115,
+    CertificateRequired = 116,
+    NoApplicationProtcol = 120,
+    #[num_enum(default)]
+    UnknownAlert = 255
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 pub(crate) enum TlsVersion {
     #[num_enum(default)]
@@ -110,6 +144,24 @@ impl<'a> TlsRepr<'a> {
         };
         self.length = handshake_repr.get_length();
         self.handshake = Some(handshake_repr);
+        self
+    }
+
+    pub(crate) fn alert(mut self, alert: AlertType) -> Self {
+        self.content_type = TlsContentType::Alert;
+        self.version = TlsVersion::Tls12;
+        let mut application_data: Vec<u8> = Vec::new();
+        match alert {
+            AlertType::CloseNotify | AlertType::UserCanceled => {
+                application_data.push(1)
+            },
+            _ => {
+                application_data.push(2)
+            }
+        };
+        application_data.push(alert.try_into().unwrap());
+        self.length = 2;
+        self.payload = Some(application_data);
         self
     }
 

@@ -14,6 +14,7 @@ use smoltcp::wire::IpEndpoint;
 
 use crate::tls::TlsState;
 use crate::tls_packet::CipherSuite;
+use crate::tls_packet::AlertType;
 use crate::key::*;
 use crate::tls_packet::SignatureScheme;
 use crate::Error;
@@ -141,6 +142,15 @@ impl<'a> Session<'a> {
     pub(crate) fn listen(&mut self) {
         self.role = TlsRole::Server;
         self.state = TlsState::SERVER_START;
+    }
+
+    pub(crate) fn invalidate_session(
+        &mut self,
+        alert: AlertType,
+        received_slice: &[u8]
+    ) {
+        self.hash.update(received_slice);
+        self.state = TlsState::NEED_RESET(alert);
     }
 
     // State transition from START to WAIT_SH
