@@ -83,6 +83,8 @@ pub(crate) struct Session<'a> {
     // Client must cent Certificate extension iff server requested it
     need_send_client_cert: bool,
     client_cert_verify_sig_alg: Option<crate::tls_packet::SignatureScheme>,
+    // Flag for the need of sending alert to terminate TLS session
+    need_send_alert: Option<AlertType>
 }
 
 impl<'a> Session<'a> {
@@ -122,7 +124,8 @@ impl<'a> Session<'a> {
             cert_public_key: None,
             cert_private_key: certificate_with_key,
             need_send_client_cert: false,
-            client_cert_verify_sig_alg: None
+            client_cert_verify_sig_alg: None,
+            need_send_alert: None
         }
     }
 
@@ -150,7 +153,13 @@ impl<'a> Session<'a> {
         received_slice: &[u8]
     ) {
         self.hash.update(received_slice);
-        self.state = TlsState::NEED_RESET(alert);
+        self.need_send_alert = Some(alert);
+    }
+
+    pub(crate) fn reset_state(&mut self) {
+        // Clear alert
+        self.need_send_alert = None;
+        self.state = TlsState::DEFAULT;
     }
 
     // State transition from START to WAIT_SH
@@ -1403,6 +1412,10 @@ impl<'a> Session<'a> {
 
     pub(crate) fn get_remote_endpoint(&self) -> IpEndpoint {
         self.remote_endpoint
+    }
+
+    pub(crate) fn get_need_send_alert(&self) -> Option<AlertType> {
+        self.need_send_alert
     }
 
     pub(crate) fn has_completed_handshake(&self) -> bool {
