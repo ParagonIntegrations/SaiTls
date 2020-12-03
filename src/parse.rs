@@ -73,7 +73,7 @@ pub(crate) fn parse_tls_repr(bytes: &[u8]) -> IResult<&[u8], (&[u8], TlsRepr)> {
                 )(bytes)?;
                 repr.handshake = Some(handshake);
             },
-            ChangeCipherSpec | ApplicationData => {
+            ChangeCipherSpec | ApplicationData | Alert => {
 	            let mut vec: Vec<u8> = Vec::new();
 	            vec.extend_from_slice(bytes);
                 repr.payload = Some(vec);

@@ -156,7 +156,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
         {
             let tcp_state = self.sockets.get::<TcpSocket>(self.tcp_handle).state();
 
-            //Close TCP socket if necessary
+            // Close TCP socket if necessary
             if tcp_state == TcpState::Established && tls_state == TlsState::DEFAULT {
                 self.sockets.get::<TcpSocket>(self.tcp_handle).close();
                 return Ok(false);
@@ -164,19 +164,42 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 
             // Skip handshake processing if it is already completed
             // However, redo TCP handshake if TLS socket is trying to connect and
-            // TCP socket is not connected
+            // TCP socket is not connected <= seems like a bad piece of idea to me
+            // Reset TLS state to DEFAULT if TCP session is interrupted
+            // This is to close off hanged TLS sockets, when its dependent TCP session
+            // has already ended.
             if tcp_state != TcpState::Established {
-                if tls_state == TlsState::CLIENT_START {
-                    // Restart TCP handshake is it is closed for some reason
-                    let mut tcp_socket = self.sockets.get::<TcpSocket>(self.tcp_handle);
-                    let session = self.session.borrow();
-                    if !tcp_socket.is_open() {
-                        tcp_socket.connect(
-                            session.get_remote_endpoint(),
-                            session.get_local_endpoint()
-                        )?;                        
+                use TlsState::*;
+                match tls_state {
+                    // Do nothing on the starting states
+                    // Namely those immediate precedes TCP handshake,
+                    // as handshake can legitimately be incomplete
+                    DEFAULT |
+                    SERVER_START => {},
+
+                    // Attempt to reconnect if the socket went down before TLS socket sent anything
+                    CLIENT_START => {
+                        let mut tcp_socket = self.sockets.get::<TcpSocket>(self.tcp_handle);
+                        let session = self.session.borrow();
+                        if !tcp_socket.is_open() {
+                            log::info!("Socket closed initially");
+                            tcp_socket.connect(
+                                session.get_remote_endpoint(),
+                                session.get_local_endpoint()
+                            )?;                        
+                        }                        
+                    }
+
+                    // For any other functioning state, the TCP connection being not
+                    // established should imply that the TLS connection had been derailed
+                    // Reset TLS state to DEFAULT to allow terminate a dead link
+                    _ => {
+                        let mut session = self.session.borrow_mut();
+                        session.reset_state();
+                        log::info!("TLS socket resets after TCP socket closed")
                     }
                 }
+
                 // Terminate the procedure, as no processing is necessary
                 return Ok(false);
             }
@@ -813,64 +836,115 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
             // Process record base on content type
             log::info!("Record type: {:?}", repr.content_type);
 
-            if repr.content_type == TlsContentType::ApplicationData {
-                log::info!("Found application data");
-                // Take the payload out of TLS Record and decrypt
-                let mut app_data = repr.payload.take().unwrap();
-                let mut associated_data = [0; 5];
-                associated_data[0] = repr.content_type.into();
-                NetworkEndian::write_u16(
-                    &mut associated_data[1..3],
-                    repr.version.into()
-                );
-                NetworkEndian::write_u16(
-                    &mut associated_data[3..5],
-                    repr.length
-                );
-                {
-                    let mut session = self.session.borrow_mut();
-                    session.decrypt_in_place_detached(
-                        &associated_data,
-                        &mut app_data
-                    ).unwrap();
-                    session.increment_remote_sequence_number();
-                }
-
-                // Discard last 16 bytes (auth tag)
-                let inner_plaintext = &app_data[..app_data.len()-16];
-                let (inner_content_type, _) = get_content_type_inner_plaintext(
-                    inner_plaintext
-                );
-                if inner_content_type != TlsContentType::Handshake {
-                    // Silently ignore non-handshakes
-                    return Ok(self.session.borrow().has_completed_handshake())
-                }
-                let (_, mut inner_handshakes) = complete(
-                    parse_inner_plaintext_for_handshake
-                )(inner_plaintext).unwrap();
-
-                // Sequentially process all handshakes
-                let num_of_handshakes = inner_handshakes.len();
-                for _ in 0..num_of_handshakes {
-                    let (handshake_slice, handshake_repr) = inner_handshakes.remove(0);
-                    if self.process(
-                        handshake_slice,
-                        TlsRepr {
-                            content_type: TlsContentType::Handshake,
-                            version: repr.version,
-                            length: u16::try_from(handshake_repr.length).unwrap() + 4,
-                            payload: None,
-                            handshake: Some(handshake_repr)
+            // Handle TLS represenatation according to the content type:
+            // Handshake & ChangeCipherSpec: Directly process the handshake
+            // Alert: Reset session immediately
+            // ApplicationData: Decrypt and then handle, with similar criteria
+            // Reject invalid contents by invalidating the TLS session
+            match repr.content_type {
+                TlsContentType::ApplicationData => {
+                    log::info!("Found application data");
+                    // Take the payload out of TLS Record and decrypt
+                    let mut app_data = repr.payload.take().unwrap();
+                    let mut associated_data = [0; 5];
+                    associated_data[0] = repr.content_type.into();
+                    NetworkEndian::write_u16(
+                        &mut associated_data[1..3],
+                        repr.version.into()
+                    );
+                    NetworkEndian::write_u16(
+                        &mut associated_data[3..5],
+                        repr.length
+                    );
+                    {
+                        let mut session = self.session.borrow_mut();
+                        session.decrypt_in_place_detached(
+                            &associated_data,
+                            &mut app_data
+                        ).unwrap();
+                        session.increment_remote_sequence_number();
+                    }
+    
+                    // Discard last 16 bytes (auth tag)
+                    let inner_plaintext = &app_data[..app_data.len()-16];
+                    let (inner_content_type, begin_zero) = get_content_type_inner_plaintext(
+                        inner_plaintext
+                    );
+                    // Find the index of the content type byte
+                    let content_type_index = match begin_zero {
+                        Some(index) => index - 1,
+                        None => app_data.len() - 16 - 1
+                    };
+    
+                    // Process contents that are not handshakes differently
+                    // Invalid: Raise an alert to remote side
+                    // ChangeCipherSpec: It should not be encrypted, raise alert
+                    // Alert: Reset TLS session and terminate TCP session directly
+                    // Handshake: Normal procedure as below
+                    // ApplicationData: Early data is silently ignored and wont be processed
+                    match inner_content_type {
+                        TlsContentType::Invalid | TlsContentType::ChangeCipherSpec => {
+                            self.session.borrow_mut().invalidate_session(
+                                AlertType::UnexpectedMessage,
+                                &inner_plaintext[..content_type_index]
+                            );
+                            return Ok(false);
+                        },
+                        TlsContentType::Alert => {
+                            self.session.borrow_mut().reset_state();
+                            return Ok(false);
+                        },
+                        TlsContentType::ApplicationData => {
+                            return Ok(
+                                self.session.borrow().has_completed_handshake()
+                            );
+                        },
+                        _ => ()
+                    }
+    
+                    let (_, mut inner_handshakes) = complete(
+                        parse_inner_plaintext_for_handshake
+                    )(inner_plaintext).unwrap();
+    
+                    // Sequentially process all handshakes
+                    let num_of_handshakes = inner_handshakes.len();
+                    for _ in 0..num_of_handshakes {
+                        let (handshake_slice, handshake_repr) = inner_handshakes.remove(0);
+                        if self.process(
+                            handshake_slice,
+                            TlsRepr {
+                                content_type: TlsContentType::Handshake,
+                                version: repr.version,
+                                length: u16::try_from(handshake_repr.length).unwrap() + 4,
+                                payload: None,
+                                handshake: Some(handshake_repr)
+                            }
+                        ).is_err() {
+                            return Ok(self.session.borrow().has_completed_handshake())
                         }
-                    ).is_err() {
+                    }
+                },
+
+                TlsContentType::ChangeCipherSpec |
+                TlsContentType::Handshake => {
+                    if self.process(repr_slice, repr).is_err() {
                         return Ok(self.session.borrow().has_completed_handshake())
                     }
+                    log::info!("Processed record");
+                },
+
+                TlsContentType::Alert => {
+                    self.session.borrow_mut().reset_state();
+                    log::info!("Received alert, closing TCP socket..");
+                },
+
+                TlsContentType::Invalid => {
+                    self.session.borrow_mut().invalidate_session(
+                        AlertType::UnexpectedMessage,
+                        &repr.payload.unwrap_or(Vec::new())
+                    );
+                    log::info!("Received invalid TLS records, terminate immediately..");
                 }
-            } else {
-                if self.process(repr_slice, repr).is_err() {
-                    return Ok(self.session.borrow().has_completed_handshake())
-                }
-                log::info!("Processed record");
             }
         }
 
