@@ -75,7 +75,7 @@ fn main() {
     };
 
     tls_socket.connect(
-        &mut sockets,
+        // &mut sockets,
         (Ipv4Address::new(192, 168, 1, 125), 1883),
         49600
     ).unwrap();

@@ -101,16 +101,28 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
         T: Into<IpEndpoint>,
         U: Into<IpEndpoint>,
     {
-        // Start TCP handshake
         let mut tcp_socket = self.sockets.get::<TcpSocket>(self.tcp_handle);
-        tcp_socket.connect(remote_endpoint, local_endpoint)?;
-
-        // Permit TLS handshake as well
         let mut session = self.session.borrow_mut();
-        session.connect(
-            tcp_socket.remote_endpoint(),
-            tcp_socket.local_endpoint()
-        );
+
+        // Start TCP handshake
+        if !tcp_socket.is_open() {
+            tcp_socket.connect(remote_endpoint, local_endpoint)?;
+            // Start TLS handshake if TCP handshake will commence
+            session.connect(
+                tcp_socket.remote_endpoint(),
+                tcp_socket.local_endpoint()
+            );
+        } else {
+            // Also start TLS handshake if for some reason TCP is ready,
+            // and TLS is idle
+            if session.get_tls_state() == TlsState::DEFAULT {
+                session.connect(
+                    tcp_socket.remote_endpoint(),
+                    tcp_socket.local_endpoint()
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -141,7 +153,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
         DeviceT: for<'d> Device<'d>
     {
         // Poll the TCP socket, no matter what
-        iface.poll(&mut self.sockets, now)?;
+        let propagated_poll = iface.poll(&mut self.sockets, now)?;
 
         // Handle TLS handshake through TLS states
         let tls_state = {
@@ -159,7 +171,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
             // Close TCP socket if necessary
             if tcp_state == TcpState::Established && tls_state == TlsState::DEFAULT {
                 self.sockets.get::<TcpSocket>(self.tcp_handle).close();
-                return Ok(false);
+                return Ok(propagated_poll);
             }
 
             // Skip handshake processing if it is already completed
@@ -187,7 +199,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                                 session.get_remote_endpoint(),
                                 session.get_local_endpoint()
                             )?;                        
-                        }                        
+                        }
                     }
 
                     // For any other functioning state, the TCP connection being not
@@ -196,12 +208,12 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                     _ => {
                         let mut session = self.session.borrow_mut();
                         session.reset_state();
-                        log::info!("TLS socket resets after TCP socket closed")
+                        log::info!("TLS socket resets after TCP socket closed");
                     }
                 }
 
                 // Terminate the procedure, as no processing is necessary
-                return Ok(false);
+                return Ok(propagated_poll);
             }
         }
 
@@ -312,7 +324,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
             // `close()` to the TCP socket
             self.session.borrow_mut().reset_state();
 
-            return Ok(false);
+            return Ok(propagated_poll);
         }
 
         // Handle TLS handshake through TLS states
@@ -555,7 +567,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 
             // There is no need to care about handshake if it was completed
             TlsState::CLIENT_CONNECTED => {
-                return Ok(true);
+                return Ok(propagated_poll);
             }
 
             // This state waits for Client Hello handshake from a client
@@ -793,7 +805,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
             // There is no need to care about handshake if it was completed
             // This is to prevent accidental dequeing of application data
             TlsState::SERVER_CONNECTED => {
-                return Ok(true);
+                return Ok(propagated_poll);
             }
 
             // Other states
@@ -811,14 +823,14 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                 // Check if there are bytes enqueued in the recv buffer
                 // No need to do further dequeuing if there are no receivable bytes
                 if !tcp_socket.can_recv() {
-                    return Ok(self.session.borrow().has_completed_handshake())
+                    return Ok(propagated_poll)
                 }
 
                 // Peak into the first 5 bytes (TLS record layer)
                 // This tells the length of the entire record
                 let length = match tcp_socket.peek(5) {
                     Ok(bytes) => NetworkEndian::read_u16(&bytes[3..5]),
-                    _ => return Ok(self.session.borrow().has_completed_handshake())
+                    _ => return Ok(propagated_poll)
                 };
 
                 // Recv the entire TLS record
@@ -830,7 +842,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
             // Parse the bytes representation of a TLS record
             let (repr_slice, mut repr) = match parse_tls_repr(&tls_repr_vec) {
                 Ok((_, (repr_slice, repr))) => (repr_slice, repr),
-                _ => return Ok(self.session.borrow().has_completed_handshake())
+                _ => return Ok(propagated_poll)
             };
 
             // Process record base on content type
@@ -888,16 +900,14 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                                 AlertType::UnexpectedMessage,
                                 &inner_plaintext[..content_type_index]
                             );
-                            return Ok(false);
+                            return Ok(propagated_poll);
                         },
                         TlsContentType::Alert => {
                             self.session.borrow_mut().reset_state();
-                            return Ok(false);
+                            return Ok(propagated_poll);
                         },
                         TlsContentType::ApplicationData => {
-                            return Ok(
-                                self.session.borrow().has_completed_handshake()
-                            );
+                            return Ok(propagated_poll);
                         },
                         _ => ()
                     }
@@ -920,7 +930,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                                 handshake: Some(handshake_repr)
                             }
                         ).is_err() {
-                            return Ok(self.session.borrow().has_completed_handshake())
+                            return Ok(propagated_poll)
                         }
                     }
                 },
@@ -928,7 +938,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                 TlsContentType::ChangeCipherSpec |
                 TlsContentType::Handshake => {
                     if self.process(repr_slice, repr).is_err() {
-                        return Ok(self.session.borrow().has_completed_handshake())
+                        return Ok(propagated_poll)
                     }
                     log::info!("Processed record");
                 },
@@ -948,7 +958,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
             }
         }
 
-        Ok(self.session.borrow().has_completed_handshake())
+        Ok(propagated_poll)
     }
 
     // Process TLS ingress during handshake
@@ -1856,15 +1866,16 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
         Ok(actual_application_data_length)
     }
 
-    pub fn send_slice(&mut self, data: &[u8]) -> Result<()> {
+    pub fn send_slice(&mut self, data: &[u8]) -> Result<usize> {
         // If the handshake is not completed, do not push bytes onto the buffer
         // through TlsSocket.send_slice()
         // Handshake send should be through TCPSocket directly.
         let mut session = self.session.borrow_mut();
         if session.get_tls_state() != TlsState::CLIENT_CONNECTED &&
             session.get_tls_state() != TlsState::SERVER_CONNECTED {
-            return Ok(());
+            return Ok(0);
         }
+        let data_length = data.len();
 
         // Sending order:
         // 1. Associated data/ TLS Record layer
@@ -1877,7 +1888,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
         ];
 
         NetworkEndian::write_u16(&mut associated_data[3..5],
-            u16::try_from(data.len()).unwrap()  // Payload length
+            u16::try_from(data_length).unwrap()  // Payload length
             + 1                                 // Content type length
             + 16                                // Auth tag length
         );
@@ -1900,7 +1911,15 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
         tcp_socket.send_slice(&vec)?;
         tcp_socket.send_slice(&tag)?;
 
-        Ok(())
+        Ok(data_length)
+    }
+
+    pub fn is_connected(&self) -> Result<bool> {
+        let session = self.session.borrow();
+        Ok(
+            session.get_tls_state() == TlsState::CLIENT_CONNECTED ||
+            session.get_tls_state() == TlsState::SERVER_CONNECTED            
+        )
     }
 
     // Send `Close notify` alert to remote side
@@ -1936,7 +1955,7 @@ use core::fmt;
 impl<'a, 'b, 'c> fmt::Write for TlsSocket<'a, 'b, 'c> {
     fn write_str(&mut self, slice: &str) -> fmt::Result {
         let slice = slice.as_bytes();
-        if self.send_slice(slice) == Ok(()) {
+        if self.send_slice(slice) == Ok(slice.len()) {
             Ok(())
         } else {
             Err(fmt::Error)

@@ -14,6 +14,12 @@ pub struct TlsSocketSet<'a, 'b, 'c> {
 #[derive(Clone, Copy, Debug)]
 pub struct TlsSocketHandle(usize);
 
+impl TlsSocketHandle {
+    pub(crate) fn new(index: usize) -> Self {
+        Self(index)
+    }
+}
+
 impl<'a, 'b, 'c> TlsSocketSet<'a, 'b, 'c> {
     pub fn new<T>(tls_sockets: T) -> Self
     where
@@ -50,24 +56,29 @@ impl<'a, 'b, 'c> TlsSocketSet<'a, 'b, 'c> {
         self.tls_sockets[handle.0].as_mut().unwrap()
     }
 
+    pub fn len(&self) -> usize {
+        self.tls_sockets.len()
+    }
+
     pub(crate) fn polled_by<DeviceT>(
         &mut self,
-        sockets: &mut SocketSet,
         iface: &mut EthernetInterface<DeviceT>,
         now: Instant
     ) -> smoltcp::Result<bool>
     where
         DeviceT: for<'d> Device<'d>
     {
+        let mut changed = false;
         for socket in self.tls_sockets.iter_mut() {
             if socket.is_some() {
-                socket.as_mut()
-                    .unwrap()
-                    .update_handshake(iface, now)?;
+                if socket.as_mut().unwrap().update_handshake(iface, now)?
+                {
+                    changed = true;
+                }
             }
         }
 
-        Ok(true)
+        Ok(changed)
     }
     
 }
