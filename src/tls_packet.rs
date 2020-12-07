@@ -406,25 +406,6 @@ impl ClientHello {
         self
     }
 
-    pub(crate) fn add_sh_supported_versions(mut self) -> Self {
-        let selected_version = TlsVersion::Tls13;
-
-        let content = SupportedVersions::ServerHello {
-            selected_version
-        };
-
-        let extension_data = ExtensionData::SupportedVersions(content);
-        let length = extension_data.get_length();
-        let extension = Extension {
-            extension_type: ExtensionType::SupportedVersions,
-            length: length.try_into().unwrap(),
-            extension_data,
-        };
-        
-        self.extensions.push(extension);
-        self
-    }
-
     pub(crate) fn add_sig_algs(mut self) -> Self {
         let mut algorithms = Vec::new();
         {
@@ -727,12 +708,6 @@ pub(crate) enum ExtensionType {
 
     #[num_enum(default)]
     Unknown = 0xFFFF,
-}
-
-impl ExtensionType {
-    pub(crate) fn get_length(&self) -> u16 {
-        return 2;
-    }
 }
 
 #[derive(Debug, Clone)]

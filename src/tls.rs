@@ -2,7 +2,6 @@ use smoltcp::socket::TcpSocket;
 use smoltcp::socket::TcpState;
 use smoltcp::socket::SocketHandle;
 use smoltcp::socket::SocketSet;
-use smoltcp::socket::TcpSocketBuffer;
 use smoltcp::wire::IpEndpoint;
 use smoltcp::Result;
 use smoltcp::Error;
@@ -585,7 +584,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                 let mut random: [u8; 32] = [0; 32];
                 self.rng.fill_bytes(&mut random);
                 let (session_id, cipher_suite, server_ecdhe_public_key) = {
-                    let mut session = self.session.borrow();
+                    let session = self.session.borrow();
                     (
                         session.get_session_id(),
                         session.get_cipher_suite(),
@@ -665,7 +664,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                 // TODO: Option to allow a certificate request
 
                 // Construct and send server certificate handshake content
-                let mut inner_plaintext = {
+                let inner_plaintext = {
                     let mut inner_plaintext: Vec<u8> = Vec::new();
                     let session = self.session.borrow();
                     let certificates = session.get_private_certificate_slices().clone();
@@ -735,7 +734,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                 log::info!("sent certificate");
 
                 // Construct and send certificate verify
-                let mut inner_plaintext = {
+                let inner_plaintext = {
                     let mut inner_plaintext = Vec::new();
                     inner_plaintext.extend_from_slice(&[
                         15,
@@ -1431,11 +1430,10 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                     // `key_share` extension: find the corresponding ECDHE shared key
                     // `signature_algorithm`: pick a signature algorithm
                     // Will not handle PSK, no 0-RTT
-                    let mut version_check = false;
                     let mut offered_p256 = false;
                     let mut offered_x25519 = false;
                     let mut ecdhe_public_key: Option<DiffieHellmanPublicKey> = None;
-                    let mut signature_algorithm: Option<SignatureScheme> = None;
+                    let signature_algorithm: Option<SignatureScheme>;
 
                     // Verify that TLS 1.3 is offered by the client
                     if let Some(supported_version_extension) = client_hello.extensions.iter().find(
@@ -1447,7 +1445,6 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                             if let SupportedVersions::ClientHello { versions, .. }
                                 = supported_version
                             {
-                                version_check = true;
                                 if versions.iter().find(
                                     |&&version| version == TlsVersion::Tls13
                                 ).is_none()
@@ -1494,7 +1491,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                             = &supported_groups.extension_data
                         {
                             // Mark down the offered and acceptable group
-                            if let Some(group) = named_group_list.iter().find(
+                            if let Some(_group) = named_group_list.iter().find(
                                 |&&named_group| {
                                     named_group == NamedGroup::secp256r1
                                 }
@@ -1502,7 +1499,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
                                 offered_p256 = true;
                             }
 
-                            if let Some(group) = named_group_list.iter().find(
+                            if let Some(_group) = named_group_list.iter().find(
                                 |&&named_group| {
                                     named_group == NamedGroup::x25519
                                 }

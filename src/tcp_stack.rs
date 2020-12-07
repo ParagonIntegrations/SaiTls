@@ -1,12 +1,10 @@
-use embedded_nal as nal;
+use embedded_nal_tcp_stack as nal;
 use smoltcp as net;
 
 use crate::set::TlsSocketHandle as SocketHandle;
 use crate::set::TlsSocketSet as SocketSet;
-use crate::tls::TlsSocket;
 
 use nal::{TcpStack, Mode, SocketAddr, nb};
-use net::Error;
 use net::iface::EthernetInterface;
 use net::time::Instant;
 use net::phy::Device;
@@ -77,15 +75,13 @@ impl<'a, 'b, 'c> TcpStack for NetworkStack<'a, 'b, 'c> {
         match self.unused_handles.borrow_mut().pop() {
             Some(handle) => {
                 // Abort any active connections on the handle.
-                log::info!("Have handle");
                 let mut sockets = self.sockets.borrow_mut();
-                let mut internal_socket = sockets.get(handle);
-                internal_socket.close();
+                let internal_socket = sockets.get(handle);
+                internal_socket.close().unwrap();
 
                 Ok(handle)
             }
             None => {
-                log::info!("Insufficient handles");
                 Err(NetworkError::NoSocket)
             },
         }
@@ -100,7 +96,7 @@ impl<'a, 'b, 'c> TcpStack for NetworkStack<'a, 'b, 'c> {
         let internal_socket = sockets.get(socket);
 
         match remote.ip() {
-            embedded_nal::IpAddr::V4(addr) => {
+            nal::IpAddr::V4(addr) => {
                 let address = {
                     let octets = addr.octets();
                     net::wire::Ipv4Address::new(octets[0], octets[1], octets[2], octets[3])
@@ -109,7 +105,7 @@ impl<'a, 'b, 'c> TcpStack for NetworkStack<'a, 'b, 'c> {
                     .connect((address, remote.port()), self.get_ephemeral_port())
                     .map_err(|_| NetworkError::ConnectionFailure)?;
             }
-            embedded_nal::IpAddr::V6(addr) => {
+            nal::IpAddr::V6(addr) => {
                 let address = {
                     let octets = addr.segments();
                     net::wire::Ipv6Address::new(
@@ -163,7 +159,7 @@ impl<'a, 'b, 'c> TcpStack for NetworkStack<'a, 'b, 'c> {
     ) -> Result<(), Self::Error> {
         let mut sockets = self.sockets.borrow_mut();
         let internal_socket = sockets.get(socket);
-        internal_socket.close();
+        internal_socket.close().unwrap();
 
         self.unused_handles.borrow_mut().push(socket).unwrap();
         Ok(())

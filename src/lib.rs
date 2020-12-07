@@ -13,7 +13,7 @@ pub mod fake_rng;
 pub mod oid;
 pub mod set;
 
-#[cfg(feature = "nal_stack")]
+#[cfg(feature = "nal_tcp_stack")]
 pub mod tcp_stack;
 
 // TODO: Implement errors

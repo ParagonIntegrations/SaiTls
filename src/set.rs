@@ -2,7 +2,6 @@ use smoltcp as net;
 
 use managed::ManagedSlice;
 use crate::tls::TlsSocket;
-use net::socket::SocketSet;
 use net::phy::Device;
 use net::iface::EthernetInterface;
 use net::time::Instant;

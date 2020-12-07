@@ -193,6 +193,7 @@ impl<'a> TlsBuffer<'a> {
 
 macro_rules! export_byte_order_fn {
     ($($write_fn_name: ident, $read_fn_name: ident, $data_type: ty, $data_size: literal),+) => {
+        #[allow(dead_code)]
         impl<'a> TlsBuffer<'a> {
             $(
                 pub(crate) fn $write_fn_name(&mut self, data: $data_type) -> Result<()> {

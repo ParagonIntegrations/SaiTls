@@ -2,7 +2,7 @@ use p256::{ EncodedPoint, ecdh::EphemeralSecret, ecdsa::signature::DigestVerifie
 use heapless::{ Vec, consts::* };
 use sha2::{ Digest, Sha256, Sha384, Sha512, digest::FixedOutput };
 use aes_gcm::{ Aes128Gcm, Aes256Gcm, aes::Aes128 };
-use aes_gcm::{ AeadInPlace, NewAead, aead::Buffer };
+use aes_gcm::{ AeadInPlace, NewAead };
 use chacha20poly1305::ChaCha20Poly1305;
 use ccm::Ccm;
 use hkdf::Hkdf;
@@ -1072,7 +1072,7 @@ impl<'a> Session<'a> {
 
     fn find_application_keying_info(&mut self) {
         // Key calculation
-        if let Ok(sha256) = self.hash.get_sha256_clone() {
+        if let Ok(_sha256) = self.hash.get_sha256_clone() {
             // Derive application traffic secret, key, IV on client's side
             // 1. Derive secret from "Handshake Secret"
             let hkdf = Hkdf::<Sha256>::from_prk(
@@ -1243,7 +1243,7 @@ impl<'a> Session<'a> {
                 },
                 _ => unreachable!()
             }
-        } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+        } else if let Ok(_sha384) = self.hash.get_sha384_clone() {
             // Derive application traffic secret, key, IV on client's side
             // 1. Derive secret from "Handshake Secret"
             let hkdf = Hkdf::<Sha384>::from_prk(
@@ -1416,10 +1416,6 @@ impl<'a> Session<'a> {
 
     pub(crate) fn get_need_send_alert(&self) -> Option<AlertType> {
         self.need_send_alert
-    }
-
-    pub(crate) fn has_completed_handshake(&self) -> bool {
-        self.state == TlsState::CLIENT_CONNECTED
     }
 
     pub(crate) fn receive_change_cipher_spec(&mut self) {
@@ -1774,38 +1770,6 @@ impl<'a> Session<'a> {
         )
     }
 
-    pub(crate) fn encrypt_in_place(
-        &self,
-        associated_data: &[u8],
-        buffer: &mut dyn Buffer
-    ) -> Result<(), Error> {
-        let (seq_num, nonce, cipher): (u64, &Vec<u8, U12>, &Cipher) = match self.role {
-            TlsRole::Client => {(
-                self.client_sequence_number,
-                self.client_handshake_nonce.as_ref().unwrap(),
-                self.client_handshake_cipher.as_ref().unwrap()
-            )},
-            TlsRole::Server => {(
-                self.server_sequence_number,
-                self.server_handshake_nonce.as_ref().unwrap(),
-                self.server_handshake_cipher.as_ref().unwrap()
-            )},
-            TlsRole::Unknown => unreachable!()
-        };
-
-        // Calculate XOR'ed nonce
-        let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
-        let clipped_seq_num: u128 = seq_num.into();
-        let mut processed_nonce: [u8; 12] = [0; 12];
-        NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
-
-        cipher.encrypt_in_place(
-            &GenericArray::from_slice(&processed_nonce),
-            associated_data,
-            buffer
-        )
-    }
-
     pub(crate) fn encrypt_in_place_detached(
         &self,
         associated_data: &[u8],
@@ -1878,39 +1842,6 @@ impl<'a> Session<'a> {
         )
     }
 
-    // Decryption using handshake keys
-    pub(crate) fn decrypt_in_place(
-        &self,
-        associated_data: &[u8],
-        buffer: &mut dyn Buffer
-    ) -> Result<(), Error> {
-        let (seq_num, nonce, cipher): (u64, &Vec<u8, U12>, &Cipher) = match self.role {
-            TlsRole::Server => {(
-                self.client_sequence_number,
-                self.client_handshake_nonce.as_ref().unwrap(),
-                self.client_handshake_cipher.as_ref().unwrap()
-            )},
-            TlsRole::Client => {(
-                self.server_sequence_number,
-                self.server_handshake_nonce.as_ref().unwrap(),
-                self.server_handshake_cipher.as_ref().unwrap()
-            )},
-            TlsRole::Unknown => unreachable!()
-        };
-
-        // Calculate XOR'ed nonce
-        let nonce: u128 = NetworkEndian::read_uint128(nonce, 12);
-        let clipped_seq_num: u128 = seq_num.into();
-        let mut processed_nonce: [u8; 12] = [0; 12];
-        NetworkEndian::write_uint128(&mut processed_nonce, nonce ^ clipped_seq_num, 12);
-
-        cipher.decrypt_in_place(
-            &GenericArray::from_slice(&processed_nonce),
-            associated_data,
-            buffer
-        )
-    }
-
     // A veriant for handshake decryption in-place and detached
     // Caller need to manually discard the authentication bytes
     pub(crate) fn decrypt_in_place_detached(
@@ -1973,10 +1904,6 @@ impl<'a> Session<'a> {
             },
             _ => unreachable!()
         }
-    }
-
-    pub(crate) fn get_session_role(&self) -> TlsRole {
-        self.role
     }
 }
 
@@ -2072,28 +1999,6 @@ pub(crate) enum Cipher {
 }
 
 impl Cipher {
-    pub(crate) fn encrypt_in_place(
-        &self,
-        nonce: &GenericArray<u8, U12>,
-        associated_data: &[u8],
-        buffer: &mut dyn Buffer
-    ) -> Result<(), Error> {
-        match self {
-            Cipher::Aes128Gcm { aes128gcm } => {
-                aes128gcm.encrypt_in_place(nonce, associated_data, buffer)
-            },
-            Cipher::Aes256Gcm { aes256gcm } => {
-                aes256gcm.encrypt_in_place(nonce, associated_data, buffer)
-            },
-            Cipher::Chacha20poly1305 { chacha20poly1305 } => {
-                chacha20poly1305.encrypt_in_place(nonce, associated_data, buffer)
-            },
-            Cipher::Ccm { ccm } => {
-                ccm.encrypt_in_place(nonce, associated_data, buffer)
-            }
-        }.map_err(|_| Error::EncryptionError)
-    }
-
     pub(crate) fn encrypt_in_place_detached(
         &self,
         nonce: &GenericArray<u8, U12>,
@@ -2114,28 +2019,6 @@ impl Cipher {
                 ccm.encrypt_in_place_detached(nonce, associated_data, buffer)
             }
         }.map_err(|_| Error::EncryptionError)
-    }
-
-    pub(crate) fn decrypt_in_place(
-        &self,
-        nonce: &GenericArray<u8, U12>,
-        associated_data: &[u8],
-        buffer: &mut dyn Buffer
-    ) -> Result<(), Error> {
-        match self {
-            Cipher::Aes128Gcm { aes128gcm } => {
-                aes128gcm.decrypt_in_place(nonce, associated_data, buffer)
-            },
-            Cipher::Aes256Gcm { aes256gcm } => {
-                aes256gcm.decrypt_in_place(nonce, associated_data, buffer)
-            },
-            Cipher::Chacha20poly1305 { chacha20poly1305 } => {
-                chacha20poly1305.decrypt_in_place(nonce, associated_data, buffer)
-            },
-            Cipher::Ccm { ccm } => {
-                ccm.decrypt_in_place(nonce, associated_data, buffer)
-            }
-        }.map_err(|_| Error::DecryptionError)
     }
 
     pub(crate) fn decrypt_in_place_detached(
