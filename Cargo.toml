@@ -58,6 +58,7 @@ features = [ "u64_backend" ]
 # Fetch from master, for "no_std" + "alloc" combination
 [dependencies.rsa]
 git = "https://github.com/RustCrypto/RSA.git"
+rev = "c879eb2"
 default-features = false
 features = [ "alloc" ]
 
@@ -93,13 +94,14 @@ optional = true
 version = "0.3.1"
 optional = true
 
-# Support old version of embedded_nal interface only
+# Support `TcpStack` from old version of embedded_nal interface
 # It is to operate with crates such as MiniMQ, which still depends on version 0.1.0
-[dependencies.embedded-nal]
+[dependencies.embedded-nal-tcp-stack]
+package = "embedded-nal"
 version = "0.1.0"
 optional = true
 
 [features]
 default = []
 std = [ "rand", "hex-literal", "simple_logger", "rsa/default" ]
-nal_stack = [ "embedded-nal" ]
+nal_tcp_stack = [ "embedded-nal-tcp-stack" ]
