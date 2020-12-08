@@ -84,7 +84,9 @@ pub(crate) struct Session<'a> {
     need_send_client_cert: bool,
     client_cert_verify_sig_alg: Option<crate::tls_packet::SignatureScheme>,
     // Flag for the need of sending alert to terminate TLS session
-    need_send_alert: Option<AlertType>
+    need_send_alert: Option<AlertType>,
+    // Flag for the need of sending certificate request to client from server
+    need_cert_req: bool
 }
 
 impl<'a> Session<'a> {
@@ -125,7 +127,8 @@ impl<'a> Session<'a> {
             cert_private_key: certificate_with_key,
             need_send_client_cert: false,
             client_cert_verify_sig_alg: None,
-            need_send_alert: None
+            need_send_alert: None,
+            need_cert_req: false
         }
     }
 
@@ -142,9 +145,10 @@ impl<'a> Session<'a> {
         self.remote_endpoint = remote_endpoint;
     }
 
-    pub(crate) fn listen(&mut self) {
+    pub(crate) fn listen(&mut self, require_cert_req: bool) {
         self.role = TlsRole::Server;
         self.state = TlsState::SERVER_START;
+        self.need_cert_req = require_cert_req;
     }
 
     pub(crate) fn invalidate_session(
@@ -664,6 +668,13 @@ impl<'a> Session<'a> {
         self.hash.update(encryption_extension_slice);
     }
 
+    pub(crate) fn server_update_for_sent_certificate_request(
+        &mut self,
+        cert_request_slice: &[u8]
+    ) {
+        self.hash.update(cert_request_slice);
+    }
+
     pub(crate) fn server_update_for_sent_certificate(
         &mut self,
         certificate_slice: &[u8]
@@ -689,6 +700,189 @@ impl<'a> Session<'a> {
         self.find_application_keying_info();
 
         // Change state
+        // It depends on the need to perform client authenication
+        if self.need_cert_req {
+            self.state = TlsState::SERVER_WAIT_CERT;
+        } else {
+            self.state = TlsState::SERVER_WAIT_FINISHED;
+        }
+    }
+
+    pub(crate) fn server_update_for_wait_cert_cr(
+        &mut self,
+        cert_slice: &[u8],
+        cert_public_key: CertificatePublicKey
+    ) {
+        self.hash.update(cert_slice);
+        self.cert_public_key.replace(cert_public_key);
+        self.state = TlsState::SERVER_WAIT_CV;
+    }
+
+    pub(crate) fn server_update_for_wait_cv(
+        &mut self,
+        cert_verify_slice: &[u8],
+        signature_algorithm: SignatureScheme,
+        signature: &[u8]
+    )
+    {
+        // Clone the transcript hash from ClientHello all the way to Certificate
+        let transcript_hash: Vec<u8, U64> = if let Ok(sha256) = self.hash.get_sha256_clone() {
+            Vec::from_slice(&sha256.finalize()).unwrap()
+        } else if let Ok(sha384) = self.hash.get_sha384_clone() {
+            Vec::from_slice(&sha384.finalize()).unwrap()
+        } else {
+            unreachable!()
+        };
+
+        // Handle Ed25519 and p256 separately
+        // These 2 algorithms have a mandated hash function
+        if signature_algorithm == SignatureScheme::ecdsa_secp256r1_sha256 {
+            let verify_hash = Sha256::new()
+                .chain(&[0x20; 64])
+                .chain("TLS 1.3, client CertificateVerify")
+                .chain(&[0])
+                .chain(&transcript_hash);
+            let ecdsa_signature = p256::ecdsa::Signature::from_asn1(signature).unwrap();
+            self.cert_public_key
+                .take()
+                .unwrap()
+                .get_ecdsa_secp256r1_sha256_verify_key()
+                .unwrap()
+                .verify_digest(
+                    verify_hash, &ecdsa_signature
+                ).unwrap();
+
+            // Usual procedures: update hash
+            self.hash.update(cert_verify_slice);
+            // At last, update client state
+            self.state = TlsState::SERVER_WAIT_FINISHED;
+            return;
+        }
+
+        // ED25519 only accepts PureEdDSA implementation
+        if signature_algorithm == SignatureScheme::ed25519 {
+            // 64 bytes of 0x20
+            // 33 bytes of text
+            // 1 byte of 0
+            // potentially 48 bytes of transcript hash
+            // 146 bytes in total
+            let mut verify_message: Vec<u8, U146> = Vec::new();
+            verify_message.extend_from_slice(&[0x20; 64]).unwrap();
+            verify_message.extend_from_slice(b"TLS 1.3, client CertificateVerify").unwrap();
+            verify_message.extend_from_slice(&[0]).unwrap();
+            verify_message.extend_from_slice(&transcript_hash).unwrap();
+            let ed25519_signature = ed25519_dalek::Signature::try_from(
+                signature
+            ).unwrap();
+            self.cert_public_key.take()
+                .unwrap()
+                .get_ed25519_public_key()
+                .unwrap()
+                .verify_strict(&verify_message, &ed25519_signature)
+                .unwrap();
+            
+            // Usual procedures: update hash
+            self.hash.update(cert_verify_slice);
+            // At last, update client state
+            self.state = TlsState::SERVER_WAIT_FINISHED;
+            return;
+        }
+
+        // Get verification hash, and verify the signature
+        use crate::tls_packet::SignatureScheme::*;
+
+        let get_rsa_padding_scheme = |sig_alg: SignatureScheme| -> PaddingScheme {
+            match sig_alg {
+                rsa_pkcs1_sha256 => {
+                    PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_256))
+                },
+                rsa_pkcs1_sha384 => {
+                    PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_384))
+                },
+                rsa_pkcs1_sha512 => {
+                    PaddingScheme::new_pkcs1v15_sign(Some(RSAHash::SHA2_512))
+                },
+                rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                    PaddingScheme::new_pss::<Sha256, FakeRandom>(FakeRandom{})
+                },
+                rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                    PaddingScheme::new_pss::<Sha384, FakeRandom>(FakeRandom{})
+                },
+                rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                    PaddingScheme::new_pss::<Sha512, FakeRandom>(FakeRandom{})
+                },
+                _ => unreachable!()
+            }
+        };
+
+        match signature_algorithm {
+            rsa_pkcs1_sha256 | rsa_pss_rsae_sha256 | rsa_pss_pss_sha256 => {
+                let verify_hash = Sha256::new()
+                    .chain(&[0x20; 64])
+                    .chain("TLS 1.3, client CertificateVerify")
+                    .chain(&[0])
+                    .chain(&transcript_hash)
+                    .finalize();
+                let padding = get_rsa_padding_scheme(signature_algorithm);
+                let verify_result = self.cert_public_key
+                    .take()
+                    .unwrap()
+                    .get_rsa_public_key()
+                    .unwrap()
+                    .verify(
+                        padding, &verify_hash, signature
+                    );
+                if verify_result.is_err() {
+                    todo!()
+                }
+            },
+            rsa_pkcs1_sha384 | rsa_pss_rsae_sha384 | rsa_pss_pss_sha384 => {
+                let verify_hash = Sha384::new()
+                    .chain(&[0x20; 64])
+                    .chain("TLS 1.3, client CertificateVerify")
+                    .chain(&[0])
+                    .chain(&transcript_hash)
+                    .finalize();
+                let padding = get_rsa_padding_scheme(signature_algorithm);
+                let verify_result = self.cert_public_key
+                    .take()
+                    .unwrap()
+                    .get_rsa_public_key()
+                    .unwrap()
+                    .verify(
+                        padding, &verify_hash, signature
+                    );
+                if verify_result.is_err() {
+                    todo!()
+                }
+            },
+            rsa_pkcs1_sha512 | rsa_pss_rsae_sha512 | rsa_pss_pss_sha512 => {
+                let verify_hash = Sha512::new()
+                    .chain(&[0x20; 64])
+                    .chain("TLS 1.3, client CertificateVerify")
+                    .chain(&[0])
+                    .chain(&transcript_hash)
+                    .finalize();
+                let padding = get_rsa_padding_scheme(signature_algorithm);
+                let verify_result = self.cert_public_key
+                    .take()
+                    .unwrap()
+                    .get_rsa_public_key()
+                    .unwrap()
+                    .verify(
+                        padding, &verify_hash, signature
+                    );
+                if verify_result.is_err() {
+                    todo!()
+                }
+            },
+            _ => unreachable!()
+        };
+
+        // Usual procedures: update hash
+        self.hash.update(cert_verify_slice);
+
+        // At last, update client state
         self.state = TlsState::SERVER_WAIT_FINISHED;
     }
 
@@ -1424,6 +1618,10 @@ impl<'a> Session<'a> {
 
     pub(crate) fn need_to_send_client_certificate(&self) -> bool {
         self.need_send_client_cert
+    }
+
+    pub(crate) fn need_to_send_cert_request(&self) -> bool {
+        self.need_cert_req
     }
 
     pub(crate) fn get_private_certificate_slices(&self) -> Option<&alloc::vec::Vec<&[u8]>> {

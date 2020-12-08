@@ -346,6 +346,7 @@ impl<'a> HandshakeData<'a> {
         match self {
             HandshakeData::ClientHello(data) => data.get_length(),
             HandshakeData::ServerHello(data) => data.get_length(),
+            HandshakeData::CertificateRequest(cr) => cr.get_length(),
             _ => 0,
         }
     }
@@ -525,7 +526,6 @@ impl ClientHello {
     pub(crate) fn finalise(mut self) -> Self {
         let mut sum = 0;
         for extension in self.extensions.iter() {
-            // TODO: Add up the extension length
             sum += extension.get_length();
         }
         self.extension_length = sum.try_into().unwrap();
@@ -994,4 +994,11 @@ pub(crate) struct CertificateRequest<'a> {
     pub(crate) certificate_request_context: &'a [u8],
     pub(crate) extensions_length: u16,
     pub(crate) extensions: Vec<Extension>,
+}
+
+impl<'a> CertificateRequest<'a> {
+    fn get_length(&self) -> usize {
+        usize::try_from(self.certificate_request_context_length).unwrap() +
+        usize::try_from(self.extensions_length).unwrap() + 3
+    }
 }

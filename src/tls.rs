@@ -127,6 +127,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 
     pub fn listen<T>(
         &mut self,
+        issue_client_verification: bool,
         local_endpoint: T
     ) -> Result<()>
     where
@@ -138,7 +139,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 
         // Update tls session to server_start
         let mut session = self.session.borrow_mut();
-        session.listen();
+        session.listen(issue_client_verification);
 
         Ok(())
     }
@@ -661,7 +662,72 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 
                 log::info!("sent encrypted extension");
 
-                // TODO: Option to allow a certificate request
+                // Send certificate request to client, on user's discretion
+                if self.session.borrow().need_to_send_cert_request() {
+                    let mut inner_plaintext: Vec<u8> = Vec::new();
+                    inner_plaintext.extend_from_slice(&[
+                        13,             // Certificate request
+                        0, 0, 0,        // Dummy length
+                        0,              // No certificate request context
+                        0, 0,           // Dummy extensions length
+                        0, 13,          // Signature Algorithm extension type
+                        0, 0,           // Dummy extension length
+                        0, 0            // Dummy signature scheme list length
+                    ]);
+                    let supported_sig_algs = [
+                        SignatureScheme::ecdsa_secp256r1_sha256,
+                        SignatureScheme::ed25519,
+                        SignatureScheme::rsa_pss_pss_sha256,
+                        SignatureScheme::rsa_pkcs1_sha256,
+                        SignatureScheme::rsa_pss_rsae_sha256,
+                        SignatureScheme::rsa_pss_pss_sha384,
+                        SignatureScheme::rsa_pkcs1_sha384,
+                        SignatureScheme::rsa_pss_rsae_sha384,
+                        SignatureScheme::rsa_pss_pss_sha512,
+                        SignatureScheme::rsa_pkcs1_sha512,
+                        SignatureScheme::rsa_pss_rsae_sha512
+                    ];
+
+                    NetworkEndian::write_u16(
+                        &mut inner_plaintext[11..13],
+                        u16::try_from(supported_sig_algs.len() * 2).unwrap()
+                    );
+
+                    NetworkEndian::write_u16(
+                        &mut inner_plaintext[9..11],
+                        u16::try_from(supported_sig_algs.len() * 2 + 2).unwrap()
+                    );
+
+                    NetworkEndian::write_u16(
+                        &mut inner_plaintext[5..7],
+                        u16::try_from(supported_sig_algs.len() * 2 + 6).unwrap()
+                    );
+
+                    NetworkEndian::write_u24(
+                        &mut inner_plaintext[1..4],
+                        u32::try_from(supported_sig_algs.len() * 2 + 9).unwrap()
+                    );
+
+                    for sig_alg in supported_sig_algs.iter() {
+                        inner_plaintext.extend_from_slice(
+                            &u16::try_from(*sig_alg).unwrap().to_be_bytes()
+                        );
+                    }
+
+                    // Push content type: Handshake
+                    inner_plaintext.push(22);
+
+                    self.send_application_slice(&mut inner_plaintext.clone())?;
+                    let inner_plaintext_length = inner_plaintext.len();
+                    {
+                        let mut session = self.session.borrow_mut();
+                        session.server_update_for_sent_certificate_request(
+                            &inner_plaintext[..(inner_plaintext_length-1)]
+                        );
+                    }
+                    
+                    log::info!("sent certificate request");
+                }
 
                 // Construct and send server certificate handshake content
                 let inner_plaintext = {
@@ -1691,6 +1757,86 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 
                     log::info!("Processed client hello")
                 }
+            },
+
+            // Receive client certificate as server
+            TlsState::SERVER_WAIT_CERT => {
+                // Verify that it is indeed an Certificate
+                let might_be_cert = repr.handshake.take().unwrap();
+
+                if might_be_cert.get_msg_type() == HandshakeType::Certificate {
+                    // Process certificates
+
+                    // let all_certificates = might_be_cert.get_all_asn1_der_certificates().unwrap();
+                    // log::info!("Number of certificates: {:?}", all_certificates.len());
+                    // log::info!("All certificates: {:?}", all_certificates);
+
+                    // TODO: Process all certificates
+                    // TODO: Conditionally allow client to send empty certificate
+                    let cert = might_be_cert.get_asn1_der_certificate().unwrap();
+
+                    // TODO: Replace this block after implementing a proper 
+                    // certificate verification procdeure
+                    cert.validate_self_signed_signature().expect("Signature mismatched");
+
+                    // Update session TLS state to WAIT_CV
+                    // Length of handshake header is 4
+                    let (_handshake_slice, cert_slice) = 
+                        take::<_, _, (&[u8], ErrorKind)>(
+                            might_be_cert.length + 4
+                        )(handshake_slice)
+                            .map_err(|_| Error::Unrecognized)?;
+
+                    self.session.borrow_mut()
+                        .server_update_for_wait_cert_cr(
+                            &cert_slice,
+                            cert.get_cert_public_key().unwrap()
+                        );
+                    log::info!("Received WAIT_CERT");
+                } else {
+                    // Unexpected handshakes
+                    // Throw alert
+                    self.session.borrow_mut().invalidate_session(
+                        AlertType::UnexpectedMessage,
+                        handshake_slice
+                    );
+                    return Ok(());
+                }
+            },
+
+            // Receive client certificate verify as server
+            // Verify the signature to the hash
+            TlsState::SERVER_WAIT_CV => {
+                // Ensure that it is CertificateVerify
+                let might_be_cert_verify = repr.handshake.take().unwrap();
+                if might_be_cert_verify.get_msg_type() != HandshakeType::CertificateVerify {
+                    // Throw alert to terminate handshake if it is not certificate verify
+                    self.session.borrow_mut().invalidate_session(
+                        AlertType::UnexpectedMessage,
+                        handshake_slice
+                    );
+                    return Ok(());
+                }
+
+                // Take out the portion for CertificateVerify
+                // Length of handshake header is 4
+                let (_handshake_slice, cert_verify_slice) = 
+                    take::<_, _, (&[u8], ErrorKind)>(
+                        might_be_cert_verify.length + 4
+                    )(handshake_slice)
+                        .map_err(|_| Error::Unrecognized)?;
+
+                // Perform verification, update TLS state if successful
+                let (sig_alg, signature) = might_be_cert_verify.get_signature().unwrap();
+                {
+                    self.session.borrow_mut()
+                        .server_update_for_wait_cv(
+                            cert_verify_slice,
+                            sig_alg,
+                            signature
+                        );
+                }
+                log::info!("Received CV");
             },
 
             TlsState::SERVER_WAIT_FINISHED => {

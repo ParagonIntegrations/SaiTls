@@ -57,30 +57,29 @@ impl TlsRng for CountingRng {}
 static mut RNG: CountingRng = CountingRng(0);
 
 fn main() {
-    // let mut socket_set_entries: [_; 8] = Default::default();
-    // let mut sockets = SocketSet::new(&mut socket_set_entries[..]);
+    let mut socket_set_entries: [_; 8] = Default::default();
+    let mut sockets = SocketSet::new(&mut socket_set_entries[..]);
 
-    // let mut tx_storage = [0; 4096];
-    // let mut rx_storage = [0; 4096];
+    let mut tx_storage = [0; 4096];
+    let mut rx_storage = [0; 4096];
 
-    // let mut tls_socket = unsafe {
-    //     let tx_buffer = TcpSocketBuffer::new(&mut tx_storage[..]);
-    //     let rx_buffer = TcpSocketBuffer::new(&mut rx_storage[..]);
-    //     let tcp_socket = smoltcp::socket::TcpSocket::new(rx_buffer, tx_buffer);
-    //     TlsSocket::new(
-    //         tcp_socket,
-    //         &mut RNG,
-    //         None
-    //     )
-    // };
+    let mut tls_socket = unsafe {
+        let tx_buffer = TcpSocketBuffer::new(&mut tx_storage[..]);
+        let rx_buffer = TcpSocketBuffer::new(&mut rx_storage[..]);
+        let tcp_socket = smoltcp::socket::TcpSocket::new(rx_buffer, tx_buffer);
+        TlsSocket::new(
+            tcp_socket,
+            &mut RNG,
+            None
+        )
+    };
 
-    // tls_socket.connect(
-    //     // &mut sockets,
-    //     (Ipv4Address::new(192, 168, 1, 125), 1883),
-    //     49600
-    // ).unwrap();
-}
-/*
+    tls_socket.connect(
+        // &mut sockets,
+        (Ipv4Address::new(192, 168, 1, 125), 1883),
+        49600
+    ).unwrap();
+
 //    tls_socket.tls_connect(&mut sockets).unwrap();
     simple_logger::SimpleLogger::new().init().unwrap();
 
@@ -361,4 +360,3 @@ const ED25519_SIGNATURE: [u8; 64] =
     hex_literal::hex!(
         "e9988fcc188fbe85a66929634badb47c5b765c3c6087a7e44b41efda1fdcd0baf67ded6159a5af6d396ca59439de8907160fc729a42ed50e69a3f54abe6dad0c"
     );
-*/
