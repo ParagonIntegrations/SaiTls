@@ -1,5 +1,5 @@
 [package]
-name = "smoltcp-tls"
+name = "SaiTLS"
 version = "0.1.0"
 authors = ["occheung"]
 edition = "2018"
