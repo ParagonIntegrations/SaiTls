@@ -141,6 +141,37 @@ Loading more than 1 certificate (i.e. a certificate chain) is experimental. Use 
 
 Note that the remote side may not necessarily accept the self-signed certificate. It is entirely up to the remote side to accept or reject your provided certificate. Designation of trusted files might be helpful (e.g. the `--trustfile` option in Ncat).
 
+## Authentication of certificate
+TLS server can madate the connecting client to authenticate themselves. This is achieved by receiving a self-signed ASN.1 certificate.
+Relevant flow:
+- Signature extraction: `get_cert_public_key()` in `certificate.rs`.
+    - The algorithm identifier field of the ASN.1 DER certificate is matched with OID of the [supported algorithms](#Features) to determine the type of signature algorithm.
+    - Parse the certificate to extract the public key. Notabilly the `parse_asn1_der_rsa_public_key()` method was invoked to parse the components of a RSA public key.
+- Validation of certificate: `validate_signature_with_trusted()` in `certificate.rs`.
+    - Again, the Algorithm ID is matched to determine the signature algorithm.
+    - (RSA) Pass the to-be-signed certificate into a hash function (i.e. digest). The process is performed indirectly for ED25519 and ECDSA-P256.
+    - (RSAPSS) Generate a determined value (`FakeRandom`) for `PaddingScheme` in the `rsa` crate. `PaddingScheme` does not use random during the verification of signature. It only use the digest.
+    - Verify signature against to-be-signed certificate using the determined signature algorithm with the found certificate public key, make sure that it matches the provided signature from the certificate.
+
+The following shows the list of certificate verification methods from external libraries:
+| Algorithms | Methods                      | Library (module)    |
+| ---------- | ---------------------------- | --------------------|
+| RSA        | `RSAPublicKey::verify()`     | rsa                 |
+| ECDSA-P256 | `VerifyingKey::verify()`     | p256::ecdsa::verify |
+| ED25519    | `PublicKey::verify_strict()` | ed25519_dalek       |
+
+## Authentication of client
+When using TLS as the client side, SaiTLS compares the acceptable signature algorithms from the server, and the algorithm of the private key. If there are no conflict in signature algorithm usage, SaiTLS will send the certificate to the server on request. However, if the server requests a certificate while the supplied certificate is not eligible to be sent, SaiTLS will instead send an empty certificate to the server, without a follow up CertificateVerify. In both cases, it is still __completely__ up to the server to accept your connection.
+
+## Authentication option of TLS server
+When used as a server, TLS socket can be configured to request client authentication. The socket will expect a self-signed ASN.1 DER certificate to be received. To request client authentication:
+```Rust
+tls_socket.listen(
+    true,           // Enable Authentication
+    ..              // port number
+).unwrap();
+```
+
 ## Feature `nal_tcp_stack`
 Implements `TcpStack` in embedded-nal (v0.1.0) for `TlsSocket`. This disguises `TlsSocket` as just another TCP socket, potentially useful for implementating application layer protocols (e.g. MQTT in minimq).
 
