@@ -6,8 +6,8 @@ use net::phy::Device;
 use net::iface::EthernetInterface;
 use net::time::Instant;
 
-pub struct TlsSocketSet<'a, 'b, 'c> {
-    tls_sockets: ManagedSlice<'a, Option<TlsSocket<'a, 'b, 'c>>>
+pub struct TlsSocketSet<'a> {
+    tls_sockets: ManagedSlice<'a, Option<TlsSocket<'a>>>
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -19,17 +19,17 @@ impl TlsSocketHandle {
     }
 }
 
-impl<'a, 'b, 'c> TlsSocketSet<'a, 'b, 'c> {
+impl<'a> TlsSocketSet<'a> {
     pub fn new<T>(tls_sockets: T) -> Self
     where
-        T: Into<ManagedSlice<'a, Option<TlsSocket<'a, 'b, 'c>>>>
+        T: Into<ManagedSlice<'a, Option<TlsSocket<'a>>>>
     {
         Self {
             tls_sockets: tls_sockets.into()
         }
     }
 
-    pub fn add(&mut self, socket: TlsSocket<'a, 'b, 'c>) -> TlsSocketHandle
+    pub fn add(&mut self, socket: TlsSocket<'a>) -> TlsSocketHandle
     {
         for (index, slot) in self.tls_sockets.iter_mut().enumerate() {
             if slot.is_none() {
@@ -51,7 +51,7 @@ impl<'a, 'b, 'c> TlsSocketSet<'a, 'b, 'c> {
         }
     }
 
-    pub fn get(&mut self, handle: TlsSocketHandle) -> &mut TlsSocket<'a, 'b, 'c> {
+    pub fn get(&mut self, handle: TlsSocketHandle) -> &mut TlsSocket<'a> {
         self.tls_sockets[handle.0].as_mut().unwrap()
     }
 

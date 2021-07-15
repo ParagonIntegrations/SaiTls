@@ -59,22 +59,22 @@ pub(crate) enum TlsState {
     SERVER_CONNECTED
 }
 
-pub struct TlsSocket<'a, 'b, 'c>
+pub struct TlsSocket<'a>
 {
     // Locally owned SocketSet, solely containing 1 TCP socket
-    sockets: SocketSet<'a, 'b, 'c>,
+    sockets: SocketSet<'a>,
     tcp_handle: SocketHandle,
-    rng: &'b mut dyn crate::TlsRng,
-    session: RefCell<Session<'b>>,
+    rng: &'a mut dyn crate::TlsRng,
+    session: RefCell<Session<'a>>,
 }
 
-impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
+impl<'a> TlsSocket<'a> {
     pub fn new(
-        tcp_socket: TcpSocket<'b>,
-        rng: &'b mut dyn crate::TlsRng,
+        tcp_socket: TcpSocket<'a>,
+        rng: &'a mut dyn crate::TlsRng,
         certificate_with_key: Option<(
             crate::session::CertificatePrivateKey,
-            Vec<&'b [u8]>
+            Vec<&'a [u8]>
         )>
     ) -> Self
     {
@@ -2095,7 +2095,7 @@ impl<'a, 'b, 'c> TlsSocket<'a, 'b, 'c> {
 }
 
 use core::fmt;
-impl<'a, 'b, 'c> fmt::Write for TlsSocket<'a, 'b, 'c> {
+impl<'a> fmt::Write for TlsSocket<'a> {
     fn write_str(&mut self, slice: &str) -> fmt::Result {
         let slice = slice.as_bytes();
         if self.send_slice(slice) == Ok(slice.len()) {

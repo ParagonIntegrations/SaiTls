@@ -26,7 +26,7 @@ default-features = true
 features = [ "heapless" ]
 
 [dependencies.smoltcp]
-git = "https://github.com/smoltcp-rs/smoltcp.git"
+version = "0.7.0"
 default-features = false
 features = ["ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "alloc"]
 

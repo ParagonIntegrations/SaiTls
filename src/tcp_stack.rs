@@ -21,14 +21,14 @@ pub enum NetworkError {
 }
 
 // Structure for implementaion TcpStack interface
-pub struct NetworkStack<'a, 'b, 'c> {
-    sockets: RefCell<SocketSet<'a, 'b, 'c>>,
+pub struct NetworkStack<'a> {
+    sockets: RefCell<SocketSet<'a>>,
     next_port: RefCell<u16>,
     unused_handles: RefCell<Vec<SocketHandle, U16>>
 }
 
-impl<'a, 'b, 'c> NetworkStack<'a, 'b, 'c> {
-    pub fn new(sockets: SocketSet<'a, 'b, 'c>) -> Self {
+impl<'a> NetworkStack<'a> {
+    pub fn new(sockets: SocketSet<'a>) -> Self {
         let mut vec = Vec::new();
         log::info!("socket set size: {:?}", sockets.len());
         for index in 0..sockets.len() {
@@ -67,7 +67,7 @@ impl<'a, 'b, 'c> NetworkStack<'a, 'b, 'c> {
     }
 }
 
-impl<'a, 'b, 'c> TcpStack for NetworkStack<'a, 'b, 'c> {
+impl<'a> TcpStack for NetworkStack<'a> {
     type TcpSocket = SocketHandle;
     type Error = NetworkError;
 
