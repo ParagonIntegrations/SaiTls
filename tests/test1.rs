@@ -49,11 +49,6 @@ async fn mqtt() {
     );
     // // Use TLS socket set & handle to access TLS socket
     let tls_handle = tls_socket_set.add(tls_socket);
-    // {
-    //     let mut tls_socket = tls_socket_set.get(tls_handle);
-    //     /* Socket manipulations */
-    //
-    // }
     let tls_stack = NetworkStack::new(tls_socket_set);
     let remote_endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(137,135,83,217)), 8883);
     tls_stack.connect(tls_handle, remote_endpoint).expect("TODO: panic message");
